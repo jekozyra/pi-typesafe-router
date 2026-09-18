@@ -10,7 +10,20 @@ Copy an [example](../examples/typesafe.json), or run `/typesafe-router setup typ
 {
   "version": 1,
   "mode": "off",
-  "backend": { "type": "typesafe" },
+  "allowHeadless": false,
+  "backend": {
+    "type": "typesafe",
+    "model": "jev-1.13.0",
+    "auth": { "source": "env", "variable": "TYPESAFE_API_KEY" }
+  },
+  "timeoutMs": 1500,
+  "generationProbeTimeoutMs": 15000,
+  "minConfidence": 0.8,
+  "maxContextChars": 12000,
+  "historyMessages": 4,
+  "outputReserveTokens": 8192,
+  "defaultRoute": "deep",
+  "uncertainRoute": "deep",
   "routes": {
     "quick": [{ "provider": "your-provider", "model": "your-fast-model" }],
     "standard": [{ "provider": "your-provider", "model": "your-balanced-model" }],
@@ -22,22 +35,25 @@ Copy an [example](../examples/typesafe.json), or run `/typesafe-router setup typ
 }
 ```
 
-Each chain contains one to eight distinct targets. Order is authoritative: unavailable or ineligible models are skipped; selection stops at the first successful `pi.setModel`. There is no random sampling, cost lookup, or automatic remote health check. `auto`, `smart-router`, and `typesafe-router` virtual providers are rejected.
+Each chain contains one to eight distinct targets. Order is authoritative: targets without a current successful doctor generation proof, or failing local eligibility, are skipped; selection stops at the first successful `pi.setModel`. A failed first target does not prevent selection of a later successful one. Remaining successful candidates keep their configured order. Doctor deduplicates probes across chains by exact provider/model identity. There is no random sampling, cost lookup, or per-task remote health probe. `auto`, `smart-router`, and `typesafe-router` virtual providers are rejected.
 
-Unknown fields, duplicate targets, invalid types, and out-of-range settings reject the entire file. An unreadable or invalid file blocks normal routed input until repaired and reloaded, or explicitly disabled with `off`. An absent file leaves the router off.
+Unknown fields, duplicate targets, invalid types, and out-of-range settings reject the entire file. Missing, unreadable, or invalid configuration disables routing. Repair the file and run `/typesafe-router doctor` to apply it; explicitly enable routing afterward if desired.
 
-| Setting               | Default | Accepted values                                                                  |
-| --------------------- | ------- | -------------------------------------------------------------------------------- |
-| `version`             | `1`     | `1`                                                                              |
-| `mode`                | `off`   | `off`, `shadow`, `auto`                                                          |
-| `allowHeadless`       | `false` | Boolean; explicitly permit automatic routing outside TUI                         |
-| `timeoutMs`           | `1500`  | Integer, 100–30000; credentials plus classification                              |
-| `minConfidence`       | `0.8`   | Number, 0–1                                                                      |
-| `maxContextChars`     | `12000` | Integer, 256–32000; combined request and history text                            |
-| `historyMessages`     | `4`     | Integer, 0–20                                                                    |
-| `outputReserveTokens` | `8192`  | Integer, 256–131072; capped at candidate's maximum output                        |
-| `defaultRoute`        | `deep`  | `quick`, `standard`, `deep`; classifier failure/unavailability                   |
-| `uncertainRoute`      | `deep`  | Same values; uncertainty, absent/low confidence, oversized or unexpanded request |
+| Setting                    | Default | Accepted values                                                                  |
+| -------------------------- | ------- | -------------------------------------------------------------------------------- |
+| `version`                  | `1`     | `1`                                                                              |
+| `mode`                     | `off`   | `off`, `shadow`, `auto`                                                          |
+| `allowHeadless`            | `false` | Boolean; explicitly permit automatic routing outside TUI                         |
+| `timeoutMs`                | `1500`  | Integer, 100–30000; credentials plus classification                              |
+| `generationProbeTimeoutMs` | `15000` | Integer, 100–60000; timeout for each model’s doctor generation probe             |
+| `minConfidence`            | `0.8`   | Number, 0–1                                                                      |
+| `maxContextChars`          | `12000` | Integer, 256–32000; combined request and history text                            |
+| `historyMessages`          | `4`     | Integer, 0–20                                                                    |
+| `outputReserveTokens`      | `8192`  | Integer, 256–131072; capped at candidate's maximum output                        |
+| `defaultRoute`             | `deep`  | `quick`, `standard`, `deep`; classifier failure/unavailability                   |
+| `uncertainRoute`           | `deep`  | Same values; uncertainty, absent/low confidence, oversized or unexpanded request |
+
+`generationProbeTimeoutMs` is a top-level setting applied separately to each distinct model probe, not a total doctor deadline. Probes request `maxTokens: 128` where supported and `maxRetries: 0`; these are fixed probe options, not configuration fields. They do not establish a strict monetary cap.
 
 Character limits use JavaScript string length. The current request is never truncated. If it cannot fit, classification is skipped and the conservative route is used. Only contiguous newest fitting conversation text is included. Set `historyMessages: 0` for request-only classification.
 
@@ -81,7 +97,7 @@ Use your own 32-hex-character account ID and a token authorized for Workers AI. 
 
 This uses AI SDK `experimental_evaluate`, pinned to SDK `7.0.105`, and the Gateway evaluation model interface. No OpenAI-compatible chat endpoint is involved. `zeroDataRetention` defaults to true; the provider may reject unsupported retention options instead of silently weakening them.
 
-Confidence is read from the per-question `providerMetadata.typesafe.confidence.task_class` map. Public documentation identifies the enclosing confidence metadata but does not demonstrate its full shape. Missing confidence remains missing and selects `uncertainRoute`; malformed confidence fails validation and selects `defaultRoute`. Run `check` with your account before relying on this experimental integration. No live service parity is claimed.
+Confidence is read from the per-question `providerMetadata.typesafe.confidence.task_class` map. Public documentation identifies the enclosing confidence metadata but does not demonstrate its full shape. Missing confidence remains missing and selects `uncertainRoute`; malformed confidence fails validation and selects `defaultRoute`. Run `/typesafe-router doctor` with your account before relying on this experimental integration. No live service parity is claimed.
 
 ### Optional Pi-managed credentials
 
@@ -89,17 +105,31 @@ All backends also accept `{"source":"pi","provider":"your-provider-id"}` as `aut
 
 ## Commands
 
-| Command                                | Effect                                                                                           |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `setup [typesafe\|cloudflare\|vercel]` | Interactive creation of an off-mode config; never overwrites                                     |
-| `on` / `shadow` / `off`                | Change session mode; on/shadow disclose text transmission                                        |
-| `cancel`                               | Abort preflight; do not submit the original prompt                                               |
-| `status`                               | Show file, mode, backend, and last routing decision                                              |
-| `validate`                             | Re-read schema and check local catalogue/auth presence/scope/context, without remote calls       |
-| `check`                                | Send one synthetic classifier request, without history; may incur charges                        |
-| `reload`                               | Reload the file and use its configured mode                                                      |
-| `recover`                              | After a failed routed generation, select the next eligible model; turn routing off; send nothing |
+| Command                                | Effect                                                                                                     |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `setup [typesafe\|cloudflare\|vercel]` | Interactive creation of an off-mode config; never overwrites                                               |
+| `doctor`                               | Apply config, test the classifier and distinct generation targets, and refresh session verification        |
+| `status` (default)                     | Read-only report of applied config, runtime mode, current model/activity, and disk differences; no network |
+| `on` / `shadow` / `off`                | Change session mode; on/shadow require successful doctor; off cancels preflight                            |
 
-Prefix each with `/typesafe-router`. `check` is explicitly networked even when automatic routing is off. In print/RPC mode it does not show an interactive confirmation; invoking it is the explicit request. Automatic routing in those modes requires `allowHeadless: true` as well as an enabled mode. Headless diagnostics go to stderr, not the assistant's output.
+Prefix each with `/typesafe-router`. With no subcommand, the command shows status.
+
+`doctor` reloads valid configuration while preserving the current session's on/off/shadow mode, rather than adopting the file's mode. It never enables an off session. Missing or invalid configuration disables routing. It never changes the selected generation model or runs or replays a user task.
+
+Doctor automatically sends one synthetic classifier request and one isolated synthetic generation request per distinct configured provider/model, without confirmation. No actual conversation transcript is sent, and generation probes have `tools: []`. **These requests may incur charges**; there is no strict monetary cap. Explicit invocation authorizes them even with routing off or in print/RPC mode with `allowHeadless: false`. Automatic routing in those modes still requires `allowHeadless: true` and an enabled mode. Headless diagnostics go to stderr, not the assistant's output.
+
+Generation probes run through Pi's `modelRegistry.complete`, using the actual configured credential providers, including OAuth, custom headers, and custom endpoints. Credentials may refresh during diagnostics. This differs from the classifier's optional API-key-only Pi credential reuse described above.
+
+Readiness requires doctor to complete successfully, including the classifier check, and at least one locally eligible, successfully probed target in each of `quick`, `standard`, and `deep`. Not every target must pass. Failed targets are skipped in subsequent preflight, preserving the configured order of remaining successful candidates. Until ready, `on`, `shadow`, and automatic input are blocked; `off` and manual Pi use remain available. A configured startup mode does not bypass verification.
+
+Verification is session-only and never persisted. Restart/reload requires doctor again. Changes to routes, credential references, backend configuration, or model metadata invalidate it even if provider/model IDs stay the same. Native auth status and provider references contribute to an in-memory identity hash; no secrets are persisted. Each doctor refresh invalidates previous proofs. Cancellation or incomplete checks never partially unlock routing; run doctor again to recover.
+
+Doctor reports runtime, config path/application result, actual session mode, current generation model, backend/model, credential source, local eligibility, classifier result/latency, generation probe outcomes, and readiness. Reports give conditional next steps for the actual state. Local eligibility alone does not prove generation-provider health; a successful probe is a health snapshot, not a guarantee of later availability, quota, or task quality.
+
+Status reports the applied configuration, not merely the file on disk. It identifies disk differences or inability to check the file, and labels the last routing decision as historical. It neither applies changes nor tests services. Use doctor to apply and test changes.
+
+Escape/Ctrl+C in the TUI or `off` cancels preflight. While Pi's non-cancellable model setter is pending, the selection lock remains held; verify the selected model before resubmitting. Doctor is serialized with preflight/model selection.
+
+After generation fails, use `/model`, inspect completed tool effects, and manually continue when safe. The router performs no post-generation fallback and never replays a task.
 
 Manual `/model` selection turns routing off. Ordinary tool loops and queued steering/follow-up messages do not reroute. Session-tree navigation turns routing off. Active preflight blocks concurrent submissions and session navigation; after cancellation settles, repeat the desired submission/navigation yourself.

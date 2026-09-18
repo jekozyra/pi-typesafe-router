@@ -83,6 +83,7 @@ const schema = z
       auth: envAuth("TYPESAFE_API_KEY"),
     }),
     timeoutMs: z.number().int().min(100).max(30_000).default(1500),
+    generationProbeTimeoutMs: z.number().int().min(100).max(60_000).default(15_000),
     minConfidence: z.number().min(0).max(1).default(0.8),
     maxContextChars: z.number().int().min(256).max(32_000).default(12_000),
     historyMessages: z.number().int().min(0).max(20).default(4),

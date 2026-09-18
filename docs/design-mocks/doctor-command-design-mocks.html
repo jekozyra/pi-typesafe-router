@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Doctor decisions</title>
+    <style>
+      :root {
+        /* viewer chrome */
+        --ch-bg: #f6f7f9;
+        --ch-panel: #ffffff;
+        --ch-ink: #16181d;
+        --ch-muted: #6b7280;
+        --ch-line: #e3e6ea;
+        --ch-accent: #2f5bd7;
+        --ch-before: #8a8f98;
+        --ch-after: #1f8a54;
+        --ch-warn: #9a6b00;
+
+        /* app tokens: replace with the real values read out of the codebase */
+        --app-bg: #ffffff;
+        --app-fg: #0a0a0a;
+        --app-muted: #71717a;
+        --app-border: #e4e4e7;
+        --app-radius: 0.5rem;
+        --app-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--ch-bg);
+        color: var(--ch-ink);
+        font:
+          15px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      header.doc {
+        padding: 28px 24px 16px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      code {
+        background: #f1f3f6;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+
+      header.doc h1 {
+        margin: 0 0 6px;
+        font-size: 22px;
+      }
+      header.doc p {
+        margin: 0;
+        color: var(--ch-muted);
+        font-size: 14px;
+      }
+      header.doc code {
+        font-size: 13px;
+      }
+
+      .attrib a {
+        color: var(--ch-accent);
+      }
+
+      /* pinned section navigation */
+      nav.pills {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        background: rgba(246, 247, 249, 0.92);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--ch-line);
+      }
+      nav.pills ol {
+        display: flex;
+        gap: 8px;
+        margin: 0 auto;
+        padding: 10px 24px;
+        max-width: 1200px;
+        list-style: none;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+      nav.pills a {
+        display: inline-block;
+        white-space: nowrap;
+        padding: 6px 12px;
+        border: 1px solid var(--ch-line);
+        border-radius: 999px;
+        background: var(--ch-panel);
+        color: var(--ch-muted);
+        font-size: 13px;
+        text-decoration: none;
+      }
+      nav.pills a:hover {
+        color: var(--ch-ink);
+        border-color: var(--ch-muted);
+      }
+      nav.pills a.active {
+        background: var(--ch-accent);
+        border-color: var(--ch-accent);
+        color: #fff;
+      }
+      nav.pills a .qid {
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      nav.pills a.nomock {
+        opacity: 0.6;
+        font-style: italic;
+      }
+      nav.pills a.resolved {
+        color: var(--ch-after);
+        border-color: #cfe6da;
+      }
+      nav.pills a.resolved.active {
+        color: #fff;
+      }
+      nav.pills a.surface {
+        border-color: var(--ch-accent);
+        color: var(--ch-accent);
+        font-weight: 600;
+      }
+      nav.pills a.surface.active {
+        color: #fff;
+      }
+
+      main {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 8px 24px 96px;
+      }
+
+      .question {
+        scroll-margin-top: 68px; /* clears the pinned nav */
+        margin: 32px 0 0;
+        padding-top: 8px;
+      }
+      section.question > h2 {
+        margin: 0 0 4px;
+        font-size: 19px;
+      }
+      section.question > .meta {
+        margin: 0 0 16px;
+        color: var(--ch-muted);
+        font-size: 13px;
+      }
+
+      .option {
+        background: var(--ch-panel);
+        border: 1px solid var(--ch-line);
+        border-radius: 10px;
+        margin: 0 0 16px;
+        overflow: hidden;
+      }
+      .option > header {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--ch-line);
+      }
+      .option > header h3 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .option > header .note {
+        color: var(--ch-muted);
+        font-size: 13px;
+      }
+      .badge {
+        font-size: 11px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #eef3ff;
+        color: var(--ch-accent);
+        border: 1px solid #d3e0ff;
+      }
+
+      .pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1px;
+        background: var(--ch-line);
+      }
+      @media (max-width: 860px) {
+        .pair {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .frame {
+        background: var(--ch-panel);
+        padding: 14px 16px 18px;
+      }
+      .frame > .label {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        margin-bottom: 10px;
+      }
+      .frame.before > .label {
+        color: var(--ch-before);
+      }
+      .frame.after > .label {
+        color: var(--ch-after);
+      }
+
+      /* the product surface itself: everything inside .surface uses app tokens only */
+      .surface {
+        background: var(--app-bg);
+        color: var(--app-fg);
+        font-family: var(--app-font);
+        border: 1px solid var(--app-border);
+        border-radius: var(--app-radius);
+        padding: 16px;
+      }
+      .surface.term {
+        background: #0d1117;
+        color: #d7dde5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        white-space: pre;
+        overflow-x: auto;
+      }
+
+      .caption {
+        margin: 8px 0 0;
+        font-size: 12px;
+        color: var(--ch-warn);
+      }
+      .states {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 0 0 10px;
+      }
+      .states span {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #f1f3f6;
+        color: var(--ch-muted);
+      }
+
+      .subq {
+        border-top: 1px dashed var(--ch-line);
+        padding: 12px 16px;
+        background: #fbfcfd;
+        font-size: 14px;
+      }
+      .subq .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--ch-muted);
+        margin-bottom: 4px;
+      }
+
+      /* resolved question: collapsed by default, stamped with the chosen option */
+      details.question > summary {
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 10px 0;
+      }
+      details.question > summary::-webkit-details-marker {
+        display: none;
+      }
+      details.question > summary::before {
+        content: "\25B8";
+        color: var(--ch-muted);
+        font-size: 12px;
+      }
+      details.question[open] > summary::before {
+        content: "\25BE";
+      }
+      details.question > summary h2 {
+        margin: 0;
+        font-size: 19px;
+        display: inline;
+      }
+      .stamp {
+        font-size: 11px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: #e8f5ee;
+        color: var(--ch-after);
+        border: 1px solid #cfe6da;
+      }
+      .discarded {
+        margin: 0;
+        padding: 12px 16px;
+        border: 1px dashed var(--ch-line);
+        border-radius: 10px;
+        background: #fbfcfd;
+      }
+      .discarded li {
+        color: var(--ch-muted);
+        font-size: 14px;
+        margin: 4px 0;
+      }
+
+      header.doc .banner {
+        margin: 10px 0 0;
+        padding: 8px 12px;
+        border: 1px solid #d3e0ff;
+        background: #f5f8ff;
+        border-radius: 8px;
+        font-size: 13px;
+        color: var(--ch-ink);
+      }
+
+      /* composite artifact: every resolved decision applied together, grouped by surface */
+      .composite {
+        border-color: var(--ch-accent);
+      }
+      .composite > header {
+        background: #f5f8ff;
+      }
+      .attrib {
+        font-size: 12px;
+        color: var(--ch-muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .interaction {
+        margin: 0;
+        padding: 10px 16px;
+        border-top: 1px dashed var(--ch-line);
+        background: #fffdf5;
+        font-size: 13px;
+        color: var(--ch-warn);
+      }
+
+      .nomock {
+        background: var(--ch-panel);
+        border: 1px dashed var(--ch-line);
+        border-radius: 10px;
+        padding: 14px 16px;
+      }
+      .nomock p.why {
+        margin: 0 0 10px;
+        color: var(--ch-muted);
+        font-size: 14px;
+      }
+      .nomock ul {
+        margin: 0;
+        padding-left: 18px;
+      }
+      .nomock li {
+        margin: 4px 0;
+        font-size: 14px;
+      }
+
+      .src {
+        color: var(--ch-muted);
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="doc">
+      <h1>Doctor decisions</h1>
+      <p>
+        Approved requirements: docs/plans/doctor-command.md. Terminal colors are viewer-only; actual
+        output inherits the Pi theme. Bracketed values are runtime fields, not measured results.
+      </p>
+    </header>
+    <nav class="pills">
+      <ol>
+        <li><a class="resolved" href="#r1">R1 ✓</a></li>
+        <li><a class="resolved" href="#r2">R2 ✓</a></li>
+      </ol>
+    </nav>
+    <main>
+      <p class="banner">
+        <a href="./doctor-command-design-mocks-final.html">Composite target state</a>
+      </p>
+      <details class="question" id="r1">
+        <summary>
+          <h2>R1. How should configuration diagnostics be organized?</h2>
+          <span class="stamp">resolved: option A</span>
+        </summary>
+        <div class="option">
+          <header><h3>Option A, One doctor command.</h3></header>
+          <div class="pair">
+            <div class="frame before">
+              <div class="label">Before</div>
+              <pre class="surface term">
+Auth presence and catalogue metadata are not remote health. Changes require reload. Classifier auth: environment value present (not verified).</pre>
+            </div>
+            <div class="frame after">
+              <div class="label">After (illustrative, not live results)</div>
+              <pre class="surface term">
+pi-typesafe-router: doctor complete
+runtime: node [version] [platform] [arch]
+config: [path] (applied)
+routing: off (doctor does not enable routing)
+classifier: typesafe / jev-1.13.0
+credentials: environment TYPESAFE_API_KEY
+routes: local eligibility; live generation checks reported below
+  quick: [provider/model] — eligible locally
+  standard: [provider/model] — eligible locally
+  deep: [provider/model] — eligible locally
+generation check: [provider/model]: passed in [duration]ms
+routing verification: ready; every route has a verified eligible candidate
+classifier check: passed in [duration]ms
+next: /typesafe-router on to enable automatic routing</pre>
+            </div>
+          </div>
+        </div>
+      </details>
+      <details class="question" id="r2">
+        <summary>
+          <h2>R2. Should doctor automatically send its classifier test?</h2>
+          <span class="stamp">resolved: option A</span>
+        </summary>
+        <div class="option">
+          <header><h3>Option A, Automatic synthetic check.</h3></header>
+          <div class="pair">
+            <div class="frame before">
+              <div class="label">Before</div>
+              <pre class="surface term">
+Run a paid/networked classifier check?
+Sends a synthetic greeting only. Does not test generation models or send session history.</pre>
+            </div>
+            <div class="frame after">
+              <div class="label">After (illustrative, not live results)</div>
+              <pre class="surface term">
+pi-typesafe-router: doctor running
+config: refreshing
+classifier check: automatic synthetic classifier and generation requests; may incur charges; no conversation history or tools
+
+classifier check: failed (HTTP 401)
+next: replace the configured classifier key, restart Pi if its environment changed, then run /typesafe-router doctor</pre>
+            </div>
+          </div>
+        </div>
+        <p class="discarded">
+          Option B, Confirm every test. Rejected by user in favor of automatic testing.
+        </p>
+      </details>
+    </main>
+    <script>
+      const links = [...document.querySelectorAll("nav.pills a")];
+      const byId = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
+      const sections = [...document.querySelectorAll(".question[id]")];
+      const setActive = (id) => {
+        links.forEach((a) => {
+          a.classList.toggle("active", a === byId.get(id));
+        });
+      };
+
+      // a pill pointing at a collapsed resolved question opens it before jumping
+      links.forEach((a) => {
+        a.addEventListener("click", () => {
+          const target = document.getElementById(a.getAttribute("href").slice(1));
+          if (target && target.tagName === "DETAILS") {
+            target.open = true;
+          }
+        });
+      });
+
+      const seen = new Set();
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting) {
+              seen.add(e.target.id);
+            } else {
+              seen.delete(e.target.id);
+            }
+          }
+          const first = sections.find((s) => seen.has(s.id));
+          if (first) {
+            setActive(first.id);
+          }
+        },
+        { rootMargin: "-68px 0px -60% 0px" },
+      );
+
+      sections.forEach((s) => {
+        io.observe(s);
+      });
+      if (links.length) {
+        setActive(links[0].getAttribute("href").slice(1));
+      }
+    </script>
+  </body>
+</html>

@@ -9,7 +9,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 
 export type RouterContext = Pick<
   ExtensionContext,
-  "mode" | "hasUI" | "scopedModels" | "model" | "isIdle" | "getSystemPrompt"
+  "mode" | "hasUI" | "scopedModels" | "model" | "isIdle" | "getSystemPrompt" | "getContextUsage"
 > & {
   sessionManager: Pick<
     ExtensionContext["sessionManager"],
@@ -17,7 +17,14 @@ export type RouterContext = Pick<
   >;
   modelRegistry: Pick<
     ExtensionContext["modelRegistry"],
-    "getAll" | "getAvailable" | "find" | "getProviderAuth"
+    | "getAll"
+    | "getAvailable"
+    | "find"
+    | "getProviderAuth"
+    | "complete"
+    | "getProviderAuthStatus"
+    | "getRegisteredProviderConfig"
+    | "getProvider"
   >;
   ui: Pick<
     ExtensionContext["ui"],

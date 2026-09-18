@@ -48,14 +48,15 @@ export function candidateChecks(
       return reject("invalid-model-limits");
 
     if (
-      !Number.isFinite(eligibility.inputTokens) ||
-      eligibility.inputTokens < 0 ||
+      (eligibility.inputTokens !== null &&
+        (!Number.isFinite(eligibility.inputTokens) || eligibility.inputTokens < 0)) ||
       !positiveFinite(eligibility.outputReserveTokens)
     )
       return reject("invalid-token-budget");
     const reserve = Math.min(eligibility.outputReserveTokens, model.maxTokens);
 
-    if (eligibility.inputTokens + reserve > model.contextWindow) return reject("context-overflow");
+    if (eligibility.inputTokens !== null && eligibility.inputTokens + reserve > model.contextWindow)
+      return reject("context-overflow");
 
     return { target, eligible: true };
   });

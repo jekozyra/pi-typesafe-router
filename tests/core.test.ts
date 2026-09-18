@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { estimateTokens, type ContextUsage } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/settings.ts";
 import { parseConfig } from "../src/config.ts";
-import { estimateInputTokens, projectState } from "../src/context.ts";
+import { contextInputTokens, projectState } from "../src/context.ts";
 import { candidateChecks, chooseRoute } from "../src/routing.ts";
 import type { Classification, Eligibility, ModelInfo, Target } from "../src/types.ts";
 
@@ -27,6 +29,7 @@ test("strict config has safe defaults and preserves slash-containing model IDs",
       auth: { source: "env", variable: "TYPESAFE_API_KEY" },
     },
     timeoutMs: 1500,
+    generationProbeTimeoutMs: 15000,
     minConfidence: 0.8,
     maxContextChars: 12000,
     historyMessages: 4,
@@ -211,45 +214,62 @@ test("projection keeps a newest fitting suffix; oversized middle messages stop o
   );
 });
 
-test("token estimate includes system, conversation, tools, unicode and image reserves without base64 expansion", () => {
-  const base = estimateInputTokens("", [], []);
-  const messages = [{ role: "user", content: "é".repeat(100) }];
-  assert.ok(estimateInputTokens("", messages, []) >= base + 200);
-  assert.ok(
-    estimateInputTokens("system", messages, [
-      { name: "tool", schema: { description: "x".repeat(1000) } },
-    ]) >
-      base + 1200,
-  );
-
-  const image = (data: string) =>
-    estimateInputTokens(
-      "",
-      [{ role: "user", content: [{ type: "image", mimeType: "image/png", data }] }],
-      [],
-    );
-
-  assert.ok(image("small") > base + 16000);
-  assert.equal(image("small"), image("x".repeat(100000)));
-
-  interface CircularFixture {
-    self?: CircularFixture;
-  }
-
-  const circular: CircularFixture = {};
-  circular.self = circular;
-  assert.equal(estimateInputTokens("", [circular], []), Infinity);
+const contextUsage = (tokens: number | null): ContextUsage => ({
+  tokens,
+  contextWindow: 272_000,
+  percent: tokens === null ? null : (tokens / 272_000) * 100,
 });
 
-test("token estimate preserves own __proto__ payloads and cycles", () => {
-  const large = "x".repeat(100_000);
-  const payload = { ["__proto__"]: large };
+const pending: UserMessage = { role: "user", content: "Explain é漢字👩🏽‍💻", timestamp: 0 };
 
-  assert.ok(estimateInputTokens("", [payload], []) >= Buffer.byteLength(JSON.stringify(payload)));
+const resolvedMessages: Parameters<typeof estimateTokens>[0][] = [
+  { role: "user", content: "Plain text", timestamp: 0 },
+  pending,
+  {
+    role: "user",
+    content: [{ type: "image", mimeType: "image/png", data: "synthetic-image" }],
+    timestamp: 0,
+  },
+  {
+    role: "toolResult",
+    toolCallId: "call-1",
+    toolName: "read",
+    content: [{ type: "text", text: "Tool output 漢字" }],
+    isError: false,
+    timestamp: 0,
+  },
+];
 
-  const circular = {};
-  Object.defineProperty(circular, "__proto__", { value: circular, enumerable: true });
-  assert.equal(estimateInputTokens("", [circular], []), Infinity);
+test("missing host usage falls back to Pi estimates for text, Unicode, images and tools", () => {
+  for (const message of resolvedMessages) {
+    assert.equal(contextInputTokens(undefined, [message]), estimateTokens(message));
+  }
+
+  const total = resolvedMessages.reduce((sum, message) => sum + estimateTokens(message), 0);
+  assert.equal(contextInputTokens(undefined, resolvedMessages), total);
+  assert.equal(
+    contextInputTokens(undefined, resolvedMessages, pending),
+    total + estimateTokens(pending),
+  );
+  assert.equal(contextInputTokens(undefined, []), 0);
+});
+
+test("known host usage, including zero, ignores raw history and adds the pending request once", () => {
+  const huge: UserMessage = { role: "user", content: "漢".repeat(300_000), timestamp: 0 };
+
+  for (const tokens of [0, 210_000]) {
+    assert.equal(contextInputTokens(contextUsage(tokens), [huge]), tokens);
+    assert.equal(
+      contextInputTokens(contextUsage(tokens), [huge], pending),
+      tokens + estimateTokens(pending),
+    );
+  }
+});
+
+test("post-compaction unknown usage never falls back to stale history", () => {
+  assert.equal(contextInputTokens(contextUsage(null), resolvedMessages), null);
+  assert.equal(contextInputTokens(contextUsage(null), resolvedMessages, pending), null);
+  assert.equal(contextInputTokens(contextUsage(null), [], pending), null);
 });
 
 const model: ModelInfo = {
@@ -348,6 +368,44 @@ test("context checks reserve min(configured output, model limit) and reject inva
     assert.equal(candidateChecks([target], eligibility({ inputTokens }))[0]?.eligible, false);
 });
 
+test("unknown context usage skips only overflow checks", () => {
+  const unknownUsage = eligibility({ inputTokens: null });
+  assert.equal(candidateChecks([target], unknownUsage)[0]?.eligible, true);
+  assert.equal(
+    candidateChecks([target], { ...unknownUsage, models: [{ ...model, contextWindow: 1 }] })[0]
+      ?.eligible,
+    true,
+  );
+
+  for (const [overrides, reason] of [
+    [{ models: [] }, "unknown-model"],
+    [{ available: [] }, "unavailable"],
+    [{ scope: [{ ...target, provider: "other" }] }, "out-of-scope"],
+    [{ hasImages: true }, "image-unsupported"],
+    [{ models: [{ ...model, maxTokens: 0 }] }, "invalid-model-limits"],
+    [{ models: [{ ...model, contextWindow: 0 }] }, "invalid-model-limits"],
+  ] satisfies [Partial<Eligibility>, string][]) {
+    assert.equal(candidateChecks([target], { ...unknownUsage, ...overrides })[0]?.reason, reason);
+  }
+
+  for (const outputReserveTokens of [0, -1, NaN, Infinity]) {
+    assert.equal(
+      candidateChecks([target], { ...unknownUsage, outputReserveTokens })[0]?.eligible,
+      false,
+    );
+  }
+
+  const virtual = { ...model, provider: "auto" };
+  assert.equal(
+    candidateChecks([{ ...target, provider: "auto" }], {
+      ...unknownUsage,
+      models: [virtual],
+      available: [virtual],
+    })[0]?.reason,
+    "virtual-provider",
+  );
+});
+
 test("missing classification uses default; uncertain or missing/low confidence abstains", () => {
   const config = parseConfig({ ...minimal(), defaultRoute: "standard", uncertainRoute: "deep" });
 
@@ -395,44 +453,6 @@ test("projection validates malformed blocks without losing valid empty text bloc
   );
 });
 
-test("token estimates fail closed for unsupported values and preserve ancestor identity", () => {
-  for (const value of [() => "secret", Symbol("secret"), 1n, NaN, Infinity, -Infinity]) {
-    assert.equal(estimateInputTokens("", [value], []), Infinity);
-    assert.equal(estimateInputTokens("", [{ nested: value }], []), Infinity);
-  }
-
-  const cycle: unknown[] = [];
-  cycle.push({ nested: cycle });
-  assert.equal(estimateInputTokens("", cycle, []), Infinity);
-  const shared = Object.freeze({ text: "same" });
-  assert.equal(
-    estimateInputTokens("", [shared, shared], []),
-    estimateInputTokens("", [{ text: "same" }, { text: "same" }], []),
-  );
-  assert.equal(estimateInputTokens("", [undefined], []), estimateInputTokens("", [null], []));
-  assert.equal(
-    estimateInputTokens(
-      "",
-      [
-        {
-          get text() {
-            throw new Error("secret");
-          },
-        },
-      ],
-      [],
-    ),
-    Infinity,
-  );
-
-  for (const type of ["image", "image_url", "input_image"]) {
-    assert.equal(
-      estimateInputTokens("", [{ type, source: cycle, data: "long".repeat(10000) }], []),
-      estimateInputTokens("", [{ type, source: "small", data: "small" }], []),
-    );
-  }
-});
-
 test("settings recognizes missing files and sanitizes malformed configurations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-router-settings-"));
   const path = join(directory, "config.json");
@@ -453,4 +473,15 @@ test("settings recognizes missing files and sanitizes malformed configurations",
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("generation probe timeout accepts only integer milliseconds within bounds", () => {
+  for (const generationProbeTimeoutMs of [100, 15000, 60000])
+    assert.equal(
+      parseConfig({ ...minimal(), generationProbeTimeoutMs }).generationProbeTimeoutMs,
+      generationProbeTimeoutMs,
+    );
+
+  for (const generationProbeTimeoutMs of [99, 60001, 100.5, "15000", null, NaN, Infinity])
+    assert.throws(() => parseConfig({ ...minimal(), generationProbeTimeoutMs }));
 });

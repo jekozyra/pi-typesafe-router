@@ -1,3 +1,5 @@
+import { estimateTokens, type ContextUsage } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import type { ClassificationState } from "./types.ts";
 
@@ -50,113 +52,17 @@ export function projectState(
   return { current_request: current, recent_conversation: recent };
 }
 
-const shallowArray = z.array(z.unknown());
+/** Use Pi's reported context count and its own estimator for unsent input. */
+export function contextInputTokens(
+  usage: ContextUsage | undefined,
+  messages: readonly Parameters<typeof estimateTokens>[0][],
+  pending?: UserMessage,
+): number | null {
+  // Pi deliberately marks usage unknown immediately after compaction.
+  if (usage?.tokens === null) return null;
 
-const shallowRecord = z.record(z.string(), z.unknown());
+  const history =
+    usage?.tokens ?? messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
 
-const recordEntries = z.array(z.tuple([z.string(), z.unknown()]));
-
-const estimateNode = z
-  .union([
-    z.undefined().transform(() => ({ kind: "scalar" as const, bytes: 4 })),
-    z.null().transform(() => ({ kind: "scalar" as const, bytes: 4 })),
-    z.string().transform((text) => ({
-      kind: "scalar" as const,
-      bytes: Buffer.byteLength(JSON.stringify(text), "utf8"),
-    })),
-    z.number().transform((number) => ({ kind: "scalar" as const, bytes: String(number).length })),
-    z.boolean().transform((boolean) => ({ kind: "scalar" as const, bytes: boolean ? 4 : 5 })),
-    z.instanceof(Object).transform((identity) => {
-      // Validate one level only; keep the original identity for ancestor detection.
-      const array = shallowArray.safeParse(identity);
-
-      if (array.success) return { kind: "array" as const, identity, items: array.data };
-      const record = shallowRecord.safeParse(identity);
-
-      if (record.success)
-        return {
-          kind: "record" as const,
-          identity,
-          // Zod's object output strips __proto__; tuples preserve every serialized key.
-          entries: recordEntries.parse(Object.entries(identity)),
-        };
-
-      return { kind: "invalid" as const };
-    }),
-  ])
-  .catch({ kind: "invalid" });
-
-type EstimateNode = z.infer<typeof estimateNode>;
-
-/**
- * Deliberately overestimates text with UTF-8 bytes, JSON syntax and framing.
- * Images get a fixed 16k reserve, not a base64-sized estimate. This is a
- * preflight heuristic, not an exact provider tokenizer or image-size guarantee.
- * Cyclic/non-serializable input fails closed rather than underestimating it.
- */
-export function estimateInputTokens(
-  systemPrompt: string,
-  messages: readonly unknown[],
-  tools: readonly unknown[],
-): number {
-  const ancestors = new Set<Extract<EstimateNode, { kind: "array" | "record" }>["identity"]>();
-
-  function estimate(node: EstimateNode): number {
-    switch (node.kind) {
-      case "invalid":
-        return Infinity;
-      case "scalar":
-        return node.bytes;
-      case "array":
-      case "record": {
-        if (ancestors.has(node.identity)) return Infinity;
-        ancestors.add(node.identity);
-
-        try {
-          if (node.kind === "array")
-            return (
-              2 +
-              node.items.reduce<number>(
-                (sum, item) => sum + estimate(estimateNode.parse(item)) + 1,
-                0,
-              )
-            );
-
-          const image = ["image", "image_url", "input_image"].includes(
-            z
-              .string()
-              .catch("")
-              .parse(node.entries.find(([key]) => key === "type")?.[1]),
-          );
-
-          let total = image ? 16_384 : 2;
-
-          for (const [key, item] of node.entries) {
-            if (image && ["data", "source", "url", "image_url", "image"].includes(key)) continue;
-            total +=
-              Buffer.byteLength(JSON.stringify(key), "utf8") +
-              estimate(estimateNode.parse(item)) +
-              2;
-          }
-
-          return total;
-        } finally {
-          ancestors.delete(node.identity);
-        }
-      }
-    }
-  }
-
-  try {
-    return (
-      256 +
-      estimate(estimateNode.parse(systemPrompt)) +
-      estimate(estimateNode.parse(messages)) +
-      estimate(estimateNode.parse(tools)) +
-      32 * (messages.length + tools.length)
-    );
-  } catch {
-    // Throwing getters, proxies and excessive nesting cannot yield a safe estimate.
-    return Infinity;
-  }
+  return history + (pending ? estimateTokens(pending) : 0);
 }

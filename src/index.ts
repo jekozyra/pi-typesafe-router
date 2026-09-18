@@ -18,8 +18,15 @@ export type { RouterAPI, RouterContext, RouterEvents } from "./host.ts";
 
 import { classify as defaultClassify } from "./classifier.ts";
 import { parseConfig } from "./config.ts";
-import { estimateInputTokens, projectState } from "./context.ts";
+import { contextInputTokens, projectState } from "./context.ts";
 import { candidateChecks, chooseRoute } from "./routing.ts";
+import { probeGeneration as defaultProbeGeneration } from "./generation-probe.ts";
+import {
+  configuredTargets,
+  verificationFingerprint,
+  type VerifiedGeneration,
+} from "./verification.ts";
+import { classifierLines, routeLines, runtimeLines, type EvaluationResult } from "./diagnostics.ts";
 import { abortable, createConfig, loadConfig } from "./settings.ts";
 import {
   ClassifierError,
@@ -41,7 +48,7 @@ const DISCLOSURE =
   "Classification sends your request and bounded recent user/assistant text to the configured backend. Text can contain private code or secrets. Shadow mode also sends data and may incur charges. No automatic generation replay or classifier-backend failover.";
 
 const HELP =
-  "/typesafe-router setup [typesafe|cloudflare|vercel] | on | shadow | off | cancel | status | validate | check | recover | reload";
+  "/typesafe-router setup [typesafe|cloudflare|vercel] | doctor | status | on | shadow | off";
 
 interface Decision {
   route: Route;
@@ -57,13 +64,15 @@ interface Decision {
 interface Operation {
   controller: AbortController;
   epoch: number;
-  phase: "classifying" | "selecting" | "loading";
+  phase: "classifying" | "selecting" | "loading" | "probing";
+  purpose: "routing" | "doctor" | "config";
   done: Promise<void>;
 }
 
 export interface Dependencies {
   configPath?: string;
   classify?: Classify;
+  probeGeneration?: typeof defaultProbeGeneration;
   load?: (path: string) => Promise<RouterConfig | undefined>;
 }
 
@@ -72,6 +81,8 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   const path = dependencies.configPath ?? join(getAgentDir(), "typesafe-router.json");
   const classify = dependencies.classify ?? defaultClassify;
   const readConfig = dependencies.load ?? loadConfig;
+  const probeGeneration = dependencies.probeGeneration ?? defaultProbeGeneration;
+  let verified: VerifiedGeneration | undefined;
   let config: RouterConfig | undefined;
   let configError = false;
   let mode: Mode = "off";
@@ -93,7 +104,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         NAME,
         mode === "off"
           ? undefined
-          : `Jev ${mode}${active ? `: ${active.phase}` : last?.target ? `: ${targetKey(last.target)}` : ""}`,
+          : `Jev ${mode}${active ? `: ${active.phase}` : !verified ? ": doctor required" : last?.target ? `: ${targetKey(last.target)}` : ""}`,
       );
   }
 
@@ -114,7 +125,8 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   }
 
   async function reload(ctx: RouterContext): Promise<boolean> {
-    const { op, cleanup } = begin(ctx);
+    verified = undefined;
+    const { op, cleanup } = begin(ctx, "config");
     op.phase = "loading";
     status(ctx);
 
@@ -138,7 +150,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       generationFailed = false;
       notify(
         ctx,
-        `Invalid router configuration at ${path}. Routing is blocked until repaired or explicitly disabled.`,
+        `Invalid router configuration at ${path}. Routing is blocked. Repair the file and run /typesafe-router doctor, or use /typesafe-router off to proceed without routing.`,
         "error",
       );
 
@@ -170,13 +182,90 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       available: ctx.modelRegistry.getAvailable(),
       scope: ctx.scopedModels.map(({ model }) => ({ provider: model.provider, model: model.id })),
       hasImages: images.length > 0 || historyHasImages,
-      inputTokens: estimateInputTokens(
-        ctx.getSystemPrompt(),
-        [...messages, { role: "user", content: text }, ...images],
-        pi.getAllTools().filter((tool) => pi.getActiveTools().includes(tool.name)),
+      inputTokens: contextInputTokens(
+        ctx.getContextUsage(),
+        messages,
+        text || images.length
+          ? { role: "user", content: [{ type: "text", text }, ...images], timestamp: Date.now() }
+          : undefined,
       ),
       outputReserveTokens: config!.outputReserveTokens,
     };
+  }
+
+  function verificationStatus(ctx: RouterContext) {
+    if (!verified || !config) return "not verified; run /typesafe-router doctor before routing";
+
+    if (verified.fingerprint !== verificationFingerprint(config, ctx.modelRegistry))
+      return "stale; model or credential references changed; run /typesafe-router doctor";
+
+    return `verified at ${verified.checkedAt}; availability is a snapshot, not a guarantee`;
+  }
+
+  async function requireVerification(ctx: RouterContext, cfg: RouterConfig, op: Operation) {
+    try {
+      if (!verified) {
+        notify(
+          ctx,
+          "Routing blocked: run /typesafe-router doctor successfully before routing. Every route needs a verified generation model.",
+          "warning",
+        );
+
+        return false;
+      }
+
+      const fresh = await abortable(() => readConfig(path), op.controller.signal);
+
+      if (!isCurrent(op)) return false;
+
+      if (
+        !fresh ||
+        JSON.stringify(fresh) !== JSON.stringify(cfg) ||
+        verified.fingerprint !== verificationFingerprint(cfg, ctx.modelRegistry)
+      ) {
+        verified = undefined;
+        notify(
+          ctx,
+          "Routing blocked: configuration, model mappings, or credential references changed. Run /typesafe-router doctor again.",
+          "warning",
+        );
+
+        return false;
+      }
+
+      const current = eligibility(ctx);
+
+      const blocked = Object.entries(cfg.routes).flatMap(([route, targets]) =>
+        candidateChecks(targets, current).some(
+          (candidate) => candidate.eligible && verified?.passed.has(targetKey(candidate.target)),
+        )
+          ? []
+          : [route],
+      );
+
+      if (blocked.length) {
+        notify(
+          ctx,
+          `Routing blocked: no currently eligible verified model for ${blocked.join(", ")}. Check model scope, credentials, and context size with /typesafe-router doctor.`,
+          "warning",
+        );
+
+        return false;
+      }
+
+      return true;
+    } catch {
+      if (isCurrent(op)) {
+        verified = undefined;
+        notify(
+          ctx,
+          "Routing blocked: configuration or verification could not be checked. Run /typesafe-router doctor.",
+          "error",
+        );
+      }
+
+      return false;
+    }
   }
 
   async function credential(
@@ -203,7 +292,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     text: string,
     op: Operation,
     synthetic = false,
-  ): Promise<{ classification?: Classification; reason: string }> {
+  ): Promise<EvaluationResult> {
     const history = synthetic
       ? []
       : ctx.sessionManager
@@ -244,10 +333,15 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       if (op.controller.signal.aborted) throw error;
 
       return {
+        failure: timeout.signal.aborted
+          ? { code: "timeout" }
+          : error instanceof ClassifierError
+            ? { code: error.code, status: error.status }
+            : { code: "unavailable" },
         reason: timeout.signal.aborted
           ? "classifier-timeout"
           : error instanceof ClassifierError
-            ? error.message
+            ? new ClassifierError(error.code, error.status).message
             : "classifier-unavailable",
       };
     } finally {
@@ -265,6 +359,11 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
     for (const check of candidateChecks(targets, checks)) {
       if (!isCurrent(op)) return { skipped };
+
+      if (!verified?.passed.has(targetKey(check.target))) {
+        skipped.push(`${targetKey(check.target)}: generation probe not passed`);
+        continue;
+      }
 
       if (!check.eligible) {
         skipped.push(`${targetKey(check.target)}: ${check.reason}`);
@@ -306,7 +405,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     status(ctx);
   }
 
-  function begin(ctx: RouterContext) {
+  function begin(ctx: RouterContext, purpose: Operation["purpose"] = "routing") {
     if (active || shuttingDown || !ctx.isIdle())
       throw new Error("Router operation is no longer permitted");
     epoch++;
@@ -316,7 +415,14 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       settle = resolve;
     });
 
-    const op: Operation = { controller: new AbortController(), epoch, phase: "classifying", done };
+    const op: Operation = {
+      controller: new AbortController(),
+      epoch,
+      phase: "classifying",
+      purpose,
+      done,
+    };
+
     active = op;
 
     const unsubscribe =
@@ -370,7 +476,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     if (configError) {
       notify(
         ctx,
-        "Router config is invalid. Repair it and reload, or /typesafe-router off to proceed without routing.",
+        "Router config is invalid. Repair it and run /typesafe-router doctor, or /typesafe-router off to proceed without routing.",
         "error",
       );
 
@@ -384,6 +490,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     const { op, cleanup } = begin(ctx);
 
     try {
+      if (!(await requireVerification(ctx, cfg, op))) return { action: "handled" };
       const result = await evaluate(ctx, cfg, event.text, op);
 
       if (!isCurrent(op)) return { action: "handled" };
@@ -394,6 +501,9 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           : chooseRoute(result.classification, cfg);
 
       const checks = eligibility(ctx, event.text, event.images);
+      checks.available = checks.available.filter((model) =>
+        verified?.passed.has(`${model.provider}/${model.id}`),
+      );
 
       const selected =
         mode === "shadow"
@@ -407,6 +517,8 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           : await select(ctx, cfg.routes[route], checks, op);
 
       if (!isCurrent(op)) return { action: "handled" };
+
+      if (!(await requireVerification(ctx, cfg, op))) return { action: "handled" };
       persist(ctx, {
         ...selected,
         ...result,
@@ -422,7 +534,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       if (!selected.target) {
         notify(
           ctx,
-          "No eligible model in the selected route. Prompt was not submitted. Run /typesafe-router validate; select a model manually or repair the mapping.",
+          "No eligible model in the selected route. Prompt was not submitted. Run /typesafe-router doctor; select a model manually or repair the mapping.",
           "error",
         );
 
@@ -456,13 +568,262 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           status(ctx);
           notify(
             ctx,
-            "Routing cancelled; prompt was not submitted. Any in-flight Pi authentication may finish selecting a model; verify /model before resubmitting.",
+            op.phase === "selecting"
+              ? "Routing cancelled; prompt was not submitted. Pi authentication finished settling; verify /model before resubmitting."
+              : "Routing cancelled; prompt was not submitted. Submit it again when ready.",
             "warning",
           );
         } catch {
           /* session disposed */
         }
       }
+    }
+  }
+
+  function activity(ctx: RouterContext) {
+    return active ? `${active.purpose}: ${active.phase}` : ctx.isIdle() ? "idle" : "Pi is running";
+  }
+
+  function currentModel(ctx: RouterContext) {
+    return `generation model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none selected"}`;
+  }
+
+  async function showStatus(ctx: RouterContext) {
+    if (shuttingDown) return;
+    const snapshotEpoch = epoch;
+    let disk = "not compared while an operation is running; showing active configuration";
+
+    if (!active) {
+      try {
+        const fresh = await readConfig(path);
+        disk = !fresh
+          ? "missing; run /typesafe-router doctor"
+          : JSON.stringify(fresh) === JSON.stringify(config)
+            ? "matches active configuration"
+            : "unapplied changes; run /typesafe-router doctor";
+      } catch {
+        disk = "invalid or unreadable; run /typesafe-router doctor";
+      }
+    }
+
+    if (shuttingDown) return;
+
+    if (snapshotEpoch !== epoch)
+      disk = "state changed during this status check; run status again to compare disk";
+
+    const lines = [
+      "pi-typesafe-router: status",
+      ...runtimeLines(mode, activity(ctx), path, config),
+      `config: ${configError ? "invalid; automatic routing blocked" : config ? "active in memory" : "not loaded"}`,
+      `disk config: ${disk}`,
+      currentModel(ctx),
+      `generation verification: ${disk.startsWith("unapplied") || disk.startsWith("invalid") || disk.startsWith("missing") ? "stale; run /typesafe-router doctor" : verificationStatus(ctx)}`,
+    ];
+
+    if (config) {
+      for (const [route, targets] of Object.entries(config.routes))
+        lines.push(`route ${route}: ${targets.map(targetKey).join(" → ")}`);
+    }
+
+    if (last)
+      lines.push(
+        `last decision (historical): ${last.route} → ${last.target ? targetKey(last.target) : "no eligible model"}; ${last.reason}; ${last.milliseconds}ms${last.shadow ? " (shadow)" : ""}`,
+      );
+    else lines.push("last decision: none in this session");
+
+    lines.push(HELP);
+    notify(ctx, lines.join("\n"));
+  }
+
+  async function doctor(ctx: RouterContext) {
+    const { op, cleanup } = begin(ctx, "doctor");
+    verified = undefined;
+    op.phase = "loading";
+    notify(
+      ctx,
+      "pi-typesafe-router: doctor running\nconfig: refreshing\nchecks: automatic synthetic classifier and generation requests; may incur charges; no conversation history or tools",
+    );
+    let applied = false;
+
+    try {
+      let loaded: RouterConfig | undefined;
+      let invalidConfig = false;
+
+      try {
+        loaded = await abortable(() => readConfig(path), op.controller.signal);
+      } catch {
+        if (!isCurrent(op)) return;
+        invalidConfig = true;
+      }
+
+      if (!isCurrent(op)) return;
+      config = loaded;
+      configError = invalidConfig;
+      last = undefined;
+      generationFailed = false;
+
+      if (!loaded) {
+        mode = "off";
+        pi.appendEntry(`${NAME}-mode`, { mode });
+        notify(
+          ctx,
+          [
+            "pi-typesafe-router: doctor failed",
+            ...runtimeLines(mode, "idle", path),
+            `config: ${invalidConfig ? "invalid or unreadable; not applied" : "missing"}`,
+            currentModel(ctx),
+            "classifier check: skipped; no valid configuration",
+            invalidConfig
+              ? "next: fix the configuration JSON, fields, or file permissions, then run /typesafe-router doctor"
+              : "next: /typesafe-router setup typesafe (or cloudflare/vercel), then /typesafe-router doctor",
+          ].join("\n"),
+          "error",
+        );
+
+        return;
+      }
+
+      applied = true;
+      const checks = eligibility(ctx);
+
+      const checkedRoutes = {
+        quick: candidateChecks(loaded.routes.quick, checks),
+        standard: candidateChecks(loaded.routes.standard, checks),
+        deep: candidateChecks(loaded.routes.deep, checks),
+      };
+
+      const blockedRoutes = Object.values(checkedRoutes).some(
+        (candidates) => !candidates.some((candidate) => candidate.eligible),
+      );
+
+      op.phase = "classifying";
+      status(ctx);
+      const fingerprint = verificationFingerprint(loaded, ctx.modelRegistry);
+      const started = Date.now();
+
+      const result = await evaluate(
+        ctx,
+        loaded,
+        "Hello. Explain what a variable is in one sentence.",
+        op,
+        true,
+      );
+
+      if (!isCurrent(op)) return;
+
+      const classifierElapsed = Date.now() - started;
+      op.phase = "probing";
+      status(ctx);
+      const probes: Awaited<ReturnType<typeof probeGeneration>>[] = [];
+
+      for (const target of configuredTargets(loaded)) {
+        if (!isCurrent(op)) return;
+        notify(
+          ctx,
+          `generation check: testing ${targetKey(target)} (synthetic text; no tools; timeout ${loaded.generationProbeTimeoutMs}ms)`,
+        );
+        probes.push(
+          await abortable(
+            () =>
+              probeGeneration(
+                ctx.modelRegistry,
+                target,
+                op.controller.signal,
+                loaded.generationProbeTimeoutMs,
+              ),
+            op.controller.signal,
+          ),
+        );
+      }
+
+      if (!isCurrent(op)) return;
+
+      const passed = new Set(
+        probes.flatMap((probe) => (probe.passed ? [targetKey(probe.target)] : [])),
+      );
+
+      const currentChecks = eligibility(ctx);
+
+      const missingRoutes = Object.entries(loaded.routes).flatMap(([route, targets]) =>
+        candidateChecks(targets, currentChecks).some(
+          (candidate) => candidate.eligible && passed.has(targetKey(candidate.target)),
+        )
+          ? []
+          : [route],
+      );
+
+      const latest = await abortable(() => readConfig(path), op.controller.signal);
+
+      if (!isCurrent(op)) return;
+
+      const unchanged =
+        !!latest &&
+        JSON.stringify(latest) === JSON.stringify(loaded) &&
+        fingerprint === verificationFingerprint(loaded, ctx.modelRegistry);
+
+      const ready = !!result.classification && missingRoutes.length === 0 && unchanged;
+
+      if (ready) verified = { fingerprint, passed, checkedAt: new Date().toISOString() };
+
+      const lines = [
+        `pi-typesafe-router: doctor ${ready ? "complete" : "needs attention"}`,
+        ...runtimeLines(mode, "idle", path, loaded),
+        "config: applied from disk; session routing mode preserved",
+        currentModel(ctx),
+        `context usage: ${checks.inputTokens === null ? "unknown after compaction; size check deferred to Pi" : `${checks.inputTokens} tokens (Pi accounting)`}`,
+        ...routeLines(checkedRoutes),
+        ...classifierLines(result, classifierElapsed, loaded),
+        ...probes.map(
+          (probe) =>
+            `generation check: ${targetKey(probe.target)}: ${probe.passed ? "passed" : `failed (${probe.reason})`} in ${probe.milliseconds}ms`,
+        ),
+        `routing verification: ${ready ? "ready; every route has a verified eligible candidate" : "blocked"}`,
+        "generation health: verified at this check only; future requests can still fail",
+      ];
+
+      if (!unchanged)
+        lines.push(
+          "next: configuration or credential references changed during doctor; run /typesafe-router doctor again",
+        );
+      else if (missingRoutes.length)
+        lines.push(
+          `next: no verified eligible model for ${missingRoutes.join(", ")}; fix model IDs, provider credentials, or access and run /typesafe-router doctor`,
+        );
+      else if (blockedRoutes)
+        lines.push(
+          "next: fix the blocked route mappings or generation credentials, then run /typesafe-router doctor",
+        );
+      else if (result.classification && ctx.mode !== "tui" && !loaded.allowHeadless)
+        lines.push(
+          "next: allowHeadless is false; automatic routing is disabled in this interface. Enable it in config and run doctor if intended",
+        );
+      else if (result.classification && mode === "off")
+        lines.push(
+          "next: /typesafe-router on to enable automatic routing, or shadow to classify without changing models",
+        );
+      else if (result.classification)
+        lines.push(
+          `routing ready: ${mode === "shadow" ? "shadow mode will classify without selecting models" : "the next idle user request will be routed"}`,
+        );
+
+      notify(ctx, lines.join("\n"), ready ? "info" : "warning");
+    } catch {
+      if (isCurrent(op))
+        notify(
+          ctx,
+          `pi-typesafe-router: doctor failed\nconfig: ${applied ? "applied" : "not applied"}\nrouting: ${mode}\nchecks: incomplete; routing verification was not granted\nnext: inspect the configuration and Pi model catalogue, then run /typesafe-router doctor again`,
+          "error",
+        );
+    } finally {
+      const cancelled = !isCurrent(op);
+      cleanup();
+
+      if (cancelled && !shuttingDown)
+        notify(
+          ctx,
+          `pi-typesafe-router: doctor cancelled\nconfig: ${applied ? "applied before cancellation" : "not applied"}\nrouting: ${mode}\nchecks: cancelled; routing verification was not granted\nnext: run /typesafe-router doctor when ready`,
+          "warning",
+        );
     }
   }
 
@@ -475,7 +836,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       if (entry.type === "custom" && entry.customType === `${NAME}-mode`) {
         const parsed = sessionModeSchema.safeParse(entry.data);
 
-        if (parsed.success) mode = parsed.data.mode;
+        if (parsed.success && config && !configError) mode = parsed.data.mode;
       }
     }
 
@@ -483,6 +844,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   });
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    verified = undefined;
     cancel();
     // A late auth result must settle before Pi tears down this extension runtime.
     await active?.done;
@@ -498,7 +860,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     cancel();
     notify(
       ctx,
-      "Routing cancelled. Wait for pending authentication to settle, then repeat session navigation.",
+      "Operation cancelled. Wait for it to settle, then repeat session navigation.",
       "warning",
     );
 
@@ -535,7 +897,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     if (mode !== "off" || active) {
       setMode("off", ctx);
       notify(ctx, "External model selection: automatic routing is now off.");
-    } else cancel(); // Also invalidate pending enable/check dialogs while already off.
+    } else cancel(); // Also invalidate pending enable dialogs while already off.
   });
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant")
@@ -550,14 +912,13 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     if (generationFailed && last?.target && !last.shadow)
       notify(
         ctx,
-        "Generation failed after Pi recovery. No automatic model replay. /typesafe-router recover selects the next eligible candidate without sending a message; inspect completed tools before continuing.",
+        "Generation failed after Pi's retries. The router did not switch models or replay the task. Use /model to select another model (this turns routing off), inspect completed tool effects, then explicitly continue.",
         "warning",
       );
   });
 
   pi.registerCommand(NAME, {
-    description:
-      "Configure Jev classification, validate model routes, or explicitly select a recovery model",
+    description: "Configure routing, run doctor diagnostics, or view active settings",
     handler: async (args, ctx) => {
       const [command = "status", option, ...extra] = args.trim().split(/\s+/).filter(Boolean);
 
@@ -567,36 +928,55 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         return;
       }
 
-      if (command === "cancel" || command === "off") {
-        if (command === "off") {
-          configError = false;
-          setMode("off", ctx);
-        } else cancel();
+      if (command === "off") {
+        configError = false;
+        setMode("off", ctx);
         notify(
           ctx,
-          command === "off"
-            ? "Routing off. No classifier requests will be sent."
-            : "Cancellation requested. No prompt will be submitted by the router.",
+          `routing: off${active ? "; cancellation requested; wait for the current operation to settle" : "; no automatic classifier requests will be sent"}`,
         );
 
         return;
       }
 
+      if (["validate", "check", "reload", "cancel", "recover"].includes(command)) {
+        notify(
+          ctx,
+          command === "recover"
+            ? "Recovery command removed. Use /model to select a model, inspect completed tool effects, then explicitly continue. No message was sent."
+            : command === "cancel"
+              ? "Cancel command removed. Use Escape or /typesafe-router off to stop pending routing."
+              : "Command removed. Use /typesafe-router doctor to refresh configuration and run local checks plus an automatic synthetic classifier test (may incur charges).",
+          "warning",
+        );
+
+        return;
+      }
+
+      if (command === "status") {
+        await showStatus(ctx);
+
+        return;
+      }
+
       if (active || shuttingDown || !ctx.isIdle()) {
-        notify(ctx, "Wait for routing and Pi to settle first (or use cancel/off).", "warning");
+        notify(
+          ctx,
+          "An operation is still running. Wait for it to finish, or use Escape /typesafe-router off to stop it.",
+          "warning",
+        );
+
+        return;
+      }
+
+      if (command === "doctor") {
+        await doctor(ctx);
 
         return;
       }
 
       const commandEpoch = ++epoch;
       const permitted = () => commandEpoch === epoch && !active && !shuttingDown && ctx.isIdle();
-
-      if (command === "reload") {
-        if (await reload(ctx))
-          notify(ctx, "Router configuration reloaded. Check status before submitting.");
-
-        return;
-      }
 
       if (command === "setup") {
         if (!ctx.hasUI) {
@@ -658,7 +1038,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           if (!permitted() || !(await reload(ctx))) return;
           notify(
             ctx,
-            `Created ${path}; routing is off. Set the backend credential environment variable, edit model mappings, then validate and enable. Existing files are never overwritten.`,
+            `Created ${path}; routing is off. Set the backend credential environment variable, edit model mappings, then run /typesafe-router doctor and /typesafe-router on. Existing files are never overwritten.`,
           );
         } catch {
           notify(
@@ -671,22 +1051,27 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         return;
       }
 
-      if (command === "status") {
+      if (!config || configError) {
         notify(
           ctx,
-          `Mode: ${mode}\nConfig: ${path}\nBackend: ${config?.backend.type ?? "not configured"}${configError ? " (invalid)" : ""}\n${last ? `Last: ${last.route} → ${last.target ? targetKey(last.target) : "no eligible model"}; ${last.reason}; ${last.milliseconds}ms${last.shadow ? " (shadow)" : ""}\nSkipped: ${last.skipped.join("; ") || "none"}` : "No decision this session."}\n${HELP}`,
+          `Run /typesafe-router doctor to load and diagnose ${path}; use setup if no file exists.`,
+          "error",
         );
 
         return;
       }
 
-      if (!config || configError) {
-        notify(ctx, `Configure ${path} first, then reload.`, "error");
-
-        return;
-      }
-
       if (command === "on" || command === "shadow") {
+        if (ctx.mode !== "tui" && !config.allowHeadless) {
+          notify(
+            ctx,
+            "Automatic routing is disabled in this interface. Set allowHeadless: true in config and run /typesafe-router doctor before enabling it.",
+            "warning",
+          );
+
+          return;
+        }
+
         if (
           ctx.hasUI &&
           !(await ctx.ui.confirm(
@@ -698,144 +1083,12 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
         if (!permitted()) return;
 
-        if (!ctx.hasUI && !config.allowHeadless) {
-          notify(
-            ctx,
-            "Set allowHeadless: true explicitly before enabling headless classification.",
-            "warning",
-          );
-
-          return;
-        }
-
-        setMode(command === "on" ? "auto" : "shadow", ctx);
-        notify(ctx, `${mode} routing enabled for this session. ${DISCLOSURE}`);
-
-        return;
-      }
-
-      if (command === "validate") {
-        try {
-          const fresh = await readConfig(path);
-
-          if (!permitted()) return;
-
-          if (!fresh) throw new Error("missing");
-          const checks = { ...eligibility(ctx), outputReserveTokens: fresh.outputReserveTokens };
-
-          const report = Object.entries(fresh.routes)
-            .map(
-              ([route, targets]) =>
-                `${route}:\n${candidateChecks(targets, checks)
-                  .map(
-                    (check) =>
-                      `  ${targetKey(check.target)}: ${check.eligible ? "eligible (not live-tested)" : check.reason}`,
-                  )
-                  .join("\n")}`,
-            )
-            .join("\n");
-
-          notify(
-            ctx,
-            `${report}\nAuth presence and catalogue metadata are not remote health. Changes require reload. Classifier auth: ${fresh.backend.auth.source === "env" ? (process.env[fresh.backend.auth.variable]?.trim() ? "environment value present (not verified)" : "environment value missing") : "Pi-managed; resolved only for explicit requests"}.`,
-          );
-        } catch {
-          notify(
-            ctx,
-            "Config validation failed. Check required fields, types and bounds. No credentials were tested.",
-            "error",
-          );
-        }
-
-        return;
-      }
-
-      if (command === "check") {
-        if (
-          ctx.hasUI &&
-          !(await ctx.ui.confirm(
-            "Run a paid/networked classifier check?",
-            "Sends a synthetic greeting only. Does not test generation models or send session history.",
-          ))
-        )
-          return;
-
-        if (!permitted()) return;
-        const { op, cleanup } = begin(ctx);
+        const { op, cleanup } = begin(ctx, "config");
 
         try {
-          const result = await evaluate(
-            ctx,
-            config,
-            "Hello. Explain what a variable is in one sentence.",
-            op,
-            true,
-          );
-
-          if (isCurrent(op))
-            notify(
-              ctx,
-              result.classification
-                ? `Classifier check succeeded: ${result.classification.choice}; confidence ${result.classification.confidence ?? "unavailable"}. This is not a quality benchmark.`
-                : `Classifier check failed: ${result.reason}`,
-              result.classification ? "info" : "warning",
-            );
-        } catch {
-          /* explicit cancellation */
-        } finally {
-          cleanup();
-        }
-
-        return;
-      }
-
-      if (command === "recover") {
-        if (!last?.target || last.shadow || !generationFailed) {
-          notify(
-            ctx,
-            "No failed routed generation to recover. Select /model manually if needed.",
-            "warning",
-          );
-
-          return;
-        }
-
-        const chain = config.routes[last.route];
-        const at = chain.findIndex((target) => targetKey(target) === targetKey(last!.target!));
-
-        if (at < 0) {
-          notify(
-            ctx,
-            "Previous model is no longer in this route; select /model manually.",
-            "warning",
-          );
-
-          return;
-        }
-
-        const { op, cleanup } = begin(ctx);
-
-        try {
-          const selected = await select(ctx, chain.slice(at + 1), eligibility(ctx), op);
-
-          if (!isCurrent(op)) return;
-
-          if (!selected.target) {
-            notify(ctx, "No later eligible candidate. No message sent.", "warning");
-
-            return;
-          }
-
-          last = { ...last, ...selected, reason: "explicit-recovery" };
-          // Prevent the next user continuation from immediately rerouting back to the failed model.
-          mode = "off";
-          pi.appendEntry(`${NAME}-mode`, { mode });
-          persist(ctx, last);
-          generationFailed = false;
-          notify(
-            ctx,
-            `Selected ${targetKey(selected.target)}. Routing is off. No message sent. Inspect completed tools and explicitly continue when ready.`,
-          );
+          if (!(await requireVerification(ctx, config, op)) || !isCurrent(op)) return;
+          setMode(command === "on" ? "auto" : "shadow", ctx);
+          notify(ctx, `${mode} routing enabled for this session. ${DISCLOSURE}`);
         } finally {
           cleanup();
         }

@@ -27,19 +27,26 @@ For a persistent local installation, use `pi install /absolute/path/to/pi-typesa
 
 ## Usage
 
-Validate the mappings, optionally test a synthetic request, then enable routing:
+Apply configuration and verify the classifier and generation targets, then enable routing:
 
 ```text
-/typesafe-router validate
-/typesafe-router check
+/typesafe-router doctor
 /typesafe-router on
 ```
 
-Use `shadow` instead of `on` to classify without changing the model. **Shadow mode still transmits text and can incur charges.** `/typesafe-router off` stops classification. `/model` selection also turns automatic routing off. Session mode changes are recorded in that session; `reload` resets to the file's mode.
+`doctor` checks local eligibility, sends one synthetic classifier request, and probes each distinct configured provider/model with an isolated synthetic generation request. No actual conversation transcript or tools are sent. **These requests may incur charges**, even while routing is off; there is no strict monetary cap. Explicit invocation also works headless with `allowHeadless: false`. Doctor never changes the selected model or runs or replays your task.
 
-Escape, Ctrl+C, or `/typesafe-router cancel` cancels preflight and stops the original prompt. If Pi is already resolving generation credentials, cancellation waits for its non-cancellable model setter; verify the selected model before resubmitting. Prompts rejected or cancelled during preflight are not automatically queued or replayed.
+Doctor must complete successfully, including the classifier check, with at least one locally eligible, successfully probed target in **each** of `quick`, `standard`, and `deep`. Until then, `on`, `shadow`, and automatic input are blocked; `off` and manual Pi use remain available. Subsequent preflight skips failed targets, even the first configured target, and preserves the configured order of remaining successful candidates. A probe is a health snapshot, not a guarantee that a later task will succeed.
 
-After a failed routed generation, `/typesafe-router recover` explicitly selects the next eligible model and turns routing off. **It sends no message.** Review completed tool effects before deciding what to send next. Pi's own retry and compaction settings remain unchanged.
+Verification is session-only and never persisted. Restart or reload requires doctor again. Changes to routes, credential references, backend configuration, or model metadata—even under the same provider/model ID—invalidate verification. Each doctor refresh discards old proofs; cancellation or incomplete checks never partially unlock routing.
+
+`/typesafe-router` (or `status`) is read-only: it reports the applied configuration, runtime mode, current model, and on-disk differences without network calls. Reports include next steps only where relevant. Pi's built-in `/reload` loads updated extension code; it is not needed for configuration changes—use `/typesafe-router doctor` instead.
+
+Use `shadow` instead of `on` to classify without changing the model. **Shadow mode still transmits text and can incur charges.** `/typesafe-router off` stops classification. `/model` selection also turns automatic routing off. Session mode changes are recorded in that session. `doctor` reloads valid configuration while preserving the current session mode; it never enables routing that is off. Missing or invalid configuration disables routing.
+
+Escape, Ctrl+C, or `/typesafe-router off` cancels preflight and stops the original prompt. If Pi is already resolving generation credentials, cancellation waits for its non-cancellable model setter; verify the selected model before resubmitting. Prompts rejected or cancelled during preflight are not automatically queued or replayed.
+
+After a failed generation, use Pi's `/model` to choose a model, inspect completed tool effects, and manually continue when safe. The router never selects a fallback after generation or replays a task. Pi's own retry and compaction settings remain unchanged.
 
 ## Configuration
 

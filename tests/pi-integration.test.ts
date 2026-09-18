@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -29,7 +29,8 @@ const initialId = "initial-and-fallback";
 const dummyKey = "integration-dummy-key-not-a-secret";
 
 /** Real Pi loader/session/provider plumbing; only generation and HTTP are synthetic. */
-async function fixture(t: TestContext, failGeneration = false) {
+async function fixture(t: TestContext, failGeneration = false, verified = true) {
+  let doctorComplete = false;
   const root = await mkdtemp(join(tmpdir(), "pi-typesafe-router-sdk-"));
   const cwd = join(root, "project");
   const agentDir = join(root, "agent");
@@ -53,7 +54,9 @@ async function fixture(t: TestContext, failGeneration = false) {
   });
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_OFFLINE = "1";
-  delete process.env.TEST_TYPESAFE_KEY;
+
+  if (verified) process.env.TEST_TYPESAFE_KEY = dummyKey;
+  else delete process.env.TEST_TYPESAFE_KEY;
 
   // No paid/network calls are permitted, even if the extension regresses.
   const http = t.mock.method(globalThis, "fetch", async () => {
@@ -123,7 +126,7 @@ async function fixture(t: TestContext, failGeneration = false) {
 
       stream.push({ type: "start", partial: message });
 
-      if (failGeneration) {
+      if (failGeneration && doctorComplete) {
         message.stopReason = "error";
         message.errorMessage = "503 synthetic generation failure";
         stream.push({ type: "error", reason: "error", error: message });
@@ -162,7 +165,7 @@ async function fixture(t: TestContext, failGeneration = false) {
   });
 
   // Import after setting the profile: no config override API is required.
-  const { default: routerExtension } = await import("../src/index.ts");
+  const { default: routerExtension, registerRouter } = await import("../src/index.ts");
 
   const resourceLoader = new DefaultResourceLoader({
     cwd,
@@ -175,7 +178,19 @@ async function fixture(t: TestContext, failGeneration = false) {
     noContextFiles: true,
     systemPrompt: "Reply briefly. This is an isolated integration test.",
     appendSystemPrompt: [],
-    extensionFactories: [routerExtension],
+    extensionFactories: [
+      verified
+        ? (pi) =>
+            registerRouter(pi, {
+              classify: async () => ({
+                choice: "standard",
+                confidence: 0.99,
+                probabilities: { quick: 0, standard: 0.99, deep: 0.01, uncertain: 0 },
+                requestedModel: "jev-1.13.0",
+              }),
+            })
+        : routerExtension,
+    ],
   });
 
   await resourceLoader.reload();
@@ -203,6 +218,22 @@ async function fixture(t: TestContext, failGeneration = false) {
   // headless mode and invokes startup hooks, just as the built-in print runner.
   await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
   assert.deepEqual(errors, []);
+
+  if (verified) {
+    await session.prompt("/typesafe-router doctor");
+    assert.deepEqual(
+      generations,
+      [
+        { provider, model: selectedId },
+        { provider, model: initialId },
+      ],
+      "doctor must probe each unique model through the real registry stream",
+    );
+    generations.length = 0;
+    events.length = 0;
+  }
+
+  doctorComplete = true;
   const sendUserMessage = t.mock.method(session, "sendUserMessage");
 
   const records = () =>
@@ -213,12 +244,41 @@ async function fixture(t: TestContext, failGeneration = false) {
           entry.type === "custom" && entry.customType.startsWith("typesafe-router"),
       );
 
-  return { session, sessionManager, generations, records, errors, events, http, sendUserMessage };
+  return {
+    session,
+    sessionManager,
+    generations,
+    records,
+    errors,
+    events,
+    http,
+    sendUserMessage,
+    configPath: join(agentDir, "typesafe-router.json"),
+  };
 }
 
 // These tests mutate process env and fetch. Keep them serial; node:test isolates
 // other test files in separate processes under the project's test command.
 describe("real Pi SDK integration", { concurrency: false }, () => {
+  it("the actual default extension blocks configured auto mode until verified", async (t) => {
+    const f = await fixture(t, false, false);
+    await f.session.prompt("Unverified input must not generate.");
+    assert.deepEqual(f.generations, []);
+    assert.equal(f.session.messages.length, 0);
+    assert.equal(f.http.mock.callCount(), 0);
+    assert.deepEqual(f.errors, []);
+  });
+  it("changing the classifier auth reference on disk blocks a verified session", async (t) => {
+    const f = await fixture(t);
+    const contents = await readFile(f.configPath, "utf8");
+    await writeFile(f.configPath, contents.replace("TEST_TYPESAFE_KEY", "CHANGED_TYPESAFE_KEY"));
+    await f.session.prompt("Do not classify or generate after credential reference changes.");
+    assert.deepEqual(f.generations, []);
+    assert.equal(f.session.messages.length, 0);
+    assert.equal(f.http.mock.callCount(), 0);
+    assert.deepEqual(f.errors, []);
+  });
+
   it("loads the extension and selects the default route's first eligible model before generation", async (t) => {
     const f = await fixture(t);
     assert.equal(f.session.model?.id, initialId);
@@ -229,10 +289,7 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
     const appended = f.records().slice(before);
     assert.ok(appended.length > 0, "routing must append a custom decision entry");
     const recordData = JSON.stringify(appended.map((entry) => entry.data));
-    assert.ok(
-      recordData.includes("standard"),
-      "missing classifier credentials must use defaultRoute, not uncertainRoute",
-    );
+    assert.ok(recordData.includes("standard"), "synthetic classifier selects the standard route");
     assert.ok(recordData.includes(selectedId), "decision entry must identify the selected model");
     assert.equal(f.session.messages.filter((message) => message.role === "user").length, 1);
     assert.equal(f.sendUserMessage.mock.callCount(), 0);
@@ -241,6 +298,27 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
       0,
       "missing classifier key must short-circuit before HTTP",
     );
+    assert.deepEqual(f.errors, []);
+  });
+
+  it("doctor runs headlessly with a missing key without HTTP or mode changes", async (t) => {
+    const f = await fixture(t, false, false);
+    await f.session.prompt("/typesafe-router off");
+    const before = f.records().length;
+    await f.session.prompt("/typesafe-router doctor");
+    assert.equal(f.session.model?.id, initialId);
+    assert.deepEqual(f.generations, [
+      { provider, model: selectedId },
+      { provider, model: initialId },
+    ]);
+    f.generations.length = 0;
+    assert.equal(f.session.messages.length, 0);
+    assert.equal(f.records().length, before);
+    assert.equal(f.sendUserMessage.mock.callCount(), 0);
+    assert.equal(f.http.mock.callCount(), 0);
+    await f.session.prompt("Doctor must preserve off mode.");
+    assert.deepEqual(f.generations, [{ provider, model: initialId }]);
+    assert.equal(f.records().length, before);
     assert.deepEqual(f.errors, []);
   });
 

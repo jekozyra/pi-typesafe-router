@@ -31,6 +31,7 @@ export interface RouterConfig {
   allowHeadless: boolean;
   backend: Backend;
   timeoutMs: number;
+  generationProbeTimeoutMs: number;
   minConfidence: number;
   maxContextChars: number;
   historyMessages: number;
@@ -96,7 +97,7 @@ export interface Eligibility {
   available: readonly ModelInfo[];
   scope: readonly Target[];
   hasImages: boolean;
-  inputTokens: number;
+  inputTokens: number | null;
   outputReserveTokens: number;
 }
 

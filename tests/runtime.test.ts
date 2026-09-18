@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, it } from "node:test";
-import type { ExtensionAPI, ExtensionContext, InputEvent } from "@earendil-works/pi-coding-agent";
+import {
+  estimateTokens,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type InputEvent,
+} from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { z } from "zod";
 
@@ -11,8 +16,14 @@ import {
   type RouterContext,
   type RouterEvents,
 } from "../src/index.ts";
+import type { probeGeneration } from "../src/generation-probe.ts";
 import { parseConfig } from "../src/config.ts";
-import type { Classification, Classify, RouterConfig } from "../src/types.ts";
+import {
+  ClassifierError,
+  type Classification,
+  type Classify,
+  type RouterConfig,
+} from "../src/types.ts";
 
 type RouterHookName = keyof RouterEvents;
 
@@ -99,6 +110,8 @@ function unusedHostMethod(): never {
 type TerminalHook = Parameters<ExtensionContext["ui"]["onTerminalInput"]>[0];
 
 interface Options {
+  unverified?: boolean;
+  probeGeneration?: typeof probeGeneration;
   config?: RouterConfig;
   load?: () => Promise<RouterConfig | undefined>;
   classify?: Classify;
@@ -108,6 +121,7 @@ interface Options {
   mode?: "tui" | "rpc";
   idle?: boolean;
   confirm?: RouterContext["ui"]["confirm"];
+  getContextUsage?: RouterContext["getContextUsage"];
 }
 
 /** Only the host boundary is synthetic. Routing, config parsing and cancellation are real. */
@@ -142,6 +156,9 @@ async function harness(options: Options = {}) {
   ];
 
   let initialized = false;
+  let warming = false;
+  let firstConfig: RouterConfig | undefined;
+  const probes: Parameters<typeof probeGeneration>[] = [];
 
   const ctx: RouterContext = {
     mode: options.mode ?? "tui",
@@ -151,6 +168,8 @@ async function harness(options: Options = {}) {
     // Pi starts the extension before a run; busy-input scenarios begin afterward.
     isIdle: () => !initialized || (options.idle ?? true),
     getSystemPrompt: () => "Synthetic system prompt",
+    getContextUsage:
+      options.getContextUsage ?? (() => ({ tokens: 0, contextWindow: 128_000, percent: 0 })),
     sessionManager: {
       getEntries: () => [],
       getLeafId: () => null,
@@ -163,6 +182,10 @@ async function harness(options: Options = {}) {
       find: (provider: string, id: string) =>
         models.find((item) => item.provider === provider && item.id === id),
       getProviderAuth: async () => ({ auth: { apiKey: SECRET } }),
+      getProviderAuthStatus: () => ({ configured: true, source: "runtime" }),
+      getRegisteredProviderConfig: () => ({ apiKey: SECRET }),
+      getProvider: () => undefined,
+      complete: unusedHostMethod,
     },
     ui: {
       select: unusedHostMethod,
@@ -249,18 +272,45 @@ async function harness(options: Options = {}) {
 
   registerRouter(pi, {
     configPath: "/synthetic/no-filesystem/router.json",
-    load: options.load ?? (async () => options.config ?? config()),
+    load: async () => {
+      if (warming) return firstConfig;
+      const loaded = await (options.load?.() ?? Promise.resolve(options.config ?? config()));
+
+      if (!initialized) firstConfig = loaded;
+
+      return loaded;
+    },
+    probeGeneration: async (...args) => {
+      if (!warming) probes.push(args);
+
+      return !warming && options.probeGeneration
+        ? options.probeGeneration(...args)
+        : { target: args[1], passed: true, reason: "ok", milliseconds: 0 };
+    },
     classify: async (...args) => {
+      if (warming) return classification();
       classifications.push(args);
 
       return options.classify ? options.classify(...args) : classification();
     },
   });
   await emit("session_start");
+
+  if (!options.unverified && firstConfig) {
+    warming = true;
+    await commands.get("typesafe-router")!("doctor", ctx);
+    warming = false;
+    entries.length = 0;
+    notifications.length = 0;
+    statuses.length = 0;
+    selections.length = 0;
+  }
+
   initialized = true;
 
   return {
     ctx,
+    probes,
     emit,
     selections,
     classifications,
@@ -377,6 +427,8 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
         model("noauth"),
         model("throws"),
         model("next"),
+        model("standard"),
+        model("deep"),
       ],
       setModel: async (selected) => {
         if (selected.id === "noauth") return false;
@@ -392,6 +444,76 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.decisions()[0].target?.model, "next");
     assert.equal(h.decisions()[0].skipped.length, 4);
     assert.deepEqual(h.sent, []);
+  });
+
+  it("uses Pi's 210000-token count for an Astra-sized model despite huge session messages", async () => {
+    const h = await harness({
+      config: config({
+        routes: { quick: [target("quick")], standard: [target("quick")], deep: [target("quick")] },
+      }),
+      models: [{ ...model("quick"), contextWindow: 272_000 }],
+      getContextUsage: () => ({ tokens: 210_000, contextWindow: 272_000, percent: 77.2 }),
+    });
+
+    h.ctx.sessionManager.getEntries = () => [
+      {
+        type: "message",
+        id: "huge-message",
+        parentId: null,
+        timestamp: new Date(0).toISOString(),
+        message: { role: "user", content: "漢".repeat(300_000), timestamp: 0 },
+      },
+    ];
+    h.ctx.sessionManager.getLeafId = () => "huge-message";
+
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
+    assert.equal(h.decisions()[0].target?.model, "quick");
+  });
+
+  it("counts the actual pending request exactly once at the host usage boundary", async () => {
+    const text = "Explain é漢字👩🏽‍💻".repeat(20);
+    const pendingTokens = estimateTokens({ role: "user", content: text, timestamp: 0 });
+    assert.ok(pendingTokens > 0);
+
+    for (const extraToken of [0, 1]) {
+      const h = await harness({
+        config: config({
+          routes: {
+            quick: [target("quick")],
+            standard: [target("quick")],
+            deep: [target("quick")],
+          },
+        }),
+        models: [{ ...model("quick"), contextWindow: 210_000 + pendingTokens + 8192 }],
+        getContextUsage: () => ({
+          tokens: 210_000 + extraToken,
+          contextWindow: 272_000,
+          percent: 77.2,
+        }),
+      });
+
+      assert.deepEqual(await h.input({ text }), {
+        action: extraToken === 0 ? "continue" : "handled",
+      });
+      assert.deepEqual(h.selections, extraToken === 0 ? ["quick"] : []);
+
+      if (extraToken === 1)
+        assert.ok(h.decisions()[0].skipped.some((reason) => reason.includes("context-overflow")));
+    }
+  });
+
+  it("unknown post-compaction context does not falsely block a candidate", async () => {
+    const h = await harness({
+      config: config({
+        routes: { quick: [target("quick")], standard: [target("quick")], deep: [target("quick")] },
+      }),
+      models: [{ ...model("quick"), contextWindow: 1 }],
+      getContextUsage: () => ({ tokens: null, contextWindow: 272_000, percent: null }),
+    });
+
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
   });
 
   it("exhausted candidates handle the original input instead of generating", async () => {
@@ -454,7 +576,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     });
 
     await entered.promise;
-    await h.command("cancel");
+    h.escape();
     assert.deepEqual(await h.input({ text: "Second submission" }), { action: "handled" });
     assert.equal(settled, false);
     assert.equal(h.classifications.length, 1);
@@ -481,36 +603,17 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     );
   });
 
-  it("generation failure never replays; explicit recover selects next and turns routing off", async () => {
-    const h = await harness({
-      config: config({
-        routes: {
-          quick: [target("quick"), target("next")],
-          standard: [target("standard")],
-          deep: [target("deep")],
-        },
-      }),
-    });
-
+  it("generation failure guides manual /model recovery without replay or selection", async () => {
+    const h = await harness();
     await h.input();
     await h.emit("message_end", {
       message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
     });
     await h.emit("agent_settled");
-    await h.emit("agent_settled");
+    assert.match(h.notifications.join("\n"), /\/model/);
+    await h.command("recover");
     assert.deepEqual(h.selections, ["quick"]);
-    assert.deepEqual(h.sent, []);
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick", "next"]);
-    assert.equal(h.decisions().at(-1)?.reason, "explicit-recovery");
-    assert.equal(
-      h.entries.filter((entry) => entry.type === "typesafe-router-mode").at(-1)?.data.mode,
-      "off",
-    );
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 1);
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick", "next"]);
+    assert.equal(h.decisions().length, 1);
     assert.deepEqual(h.sent, []);
   });
 
@@ -554,51 +657,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.terminal.size, 0);
   });
 
-  it("a stale check confirmation cannot replace a routed input's pending setter", async () => {
-    const dialog = deferred<boolean>();
-    const asked = deferred<void>();
-    const entered = deferred<void>();
-    const setter = deferred<boolean>();
-
-    const h = await harness({
-      confirm: () => {
-        asked.resolve();
-
-        return dialog.promise;
-      },
-      setModel: () => {
-        entered.resolve();
-
-        return setter.promise;
-      },
-    });
-
-    const check = h.command("check");
-    await asked.promise;
-    const input = h.input();
-    await entered.promise;
-    dialog.resolve(true);
-    await check;
-    assert.equal(h.classifications.length, 1, "stale check must not classify");
-    assert.deepEqual(await h.input({ text: "Concurrent submission" }), { action: "handled" });
-    assert.equal(h.terminal.size, 1, "original operation retains its cancellation hook");
-    let shutdownSettled = false;
-
-    const shutdown = h.emit("session_shutdown").then(() => {
-      shutdownSettled = true;
-    });
-
-    await nextTurn();
-    assert.equal(shutdownSettled, false, "shutdown must await the original setter");
-    setter.resolve(true);
-    assert.deepEqual(await input, { action: "handled" });
-    await shutdown;
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
-  });
-
-  it("reload owns the input lock and rejects a second reload until its read settles", async () => {
+  it("doctor owns the input lock and rejects a second doctor until its read settles", async () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
@@ -612,21 +671,21 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       },
     });
 
-    const reload = h.command("reload");
+    const doctor = h.command("doctor");
     await entered.promise;
     assert.deepEqual(await h.input(), { action: "handled" });
-    await h.command("reload");
+    await h.command("doctor");
     assert.equal(reads, 2);
     assert.equal(h.classifications.length, 0);
     assert.deepEqual(h.selections, []);
     read.resolve(config({ mode: "shadow" }));
-    await reload;
+    await doctor;
     assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 1);
-    assert.equal(h.decisions()[0].shadow, true);
+    assert.equal(h.classifications.length, 2);
+    assert.equal(h.decisions()[0].shadow, false);
   });
 
-  it("off cancels a pending reload and its late read cannot reenable routing", async () => {
+  it("off cancels a pending doctor and its late read cannot reenable routing", async () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
@@ -640,10 +699,10 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       },
     });
 
-    const reload = h.command("reload");
+    const doctor = h.command("doctor");
     await entered.promise;
     await h.command("off");
-    await reload; // Cancellation must not wait for the underlying filesystem read.
+    await doctor; // Cancellation must not wait for the underlying filesystem read.
     assert.deepEqual(await h.input(), { action: "continue" });
     read.resolve(config({ mode: "auto" }));
     await nextTurn();
@@ -651,10 +710,10 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.classifications.length, 0);
     assert.deepEqual(h.selections, []);
     await h.command("status");
-    assert.match(h.notifications.at(-1)!, /^Mode: off\n/);
+    assert.match(h.notifications.at(-1)!, /(?:mode|routing): off/i);
   });
 
-  it("shutdown aborts a pending reload without waiting for or publishing its late read", async () => {
+  it("shutdown aborts a pending doctor without waiting for or publishing its late read", async () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
@@ -668,11 +727,11 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       },
     });
 
-    const reload = h.command("reload");
+    const doctor = h.command("doctor");
     await entered.promise;
     const published = [h.entries.length, h.statuses.length, h.notifications.length];
     await h.emit("session_shutdown");
-    await reload;
+    await doctor;
     assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
     read.resolve(config({ mode: "auto" }));
     await nextTurn();
@@ -681,75 +740,6 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.deepEqual(h.selections, []);
     assert.equal(h.terminal.size, 0);
   });
-
-  for (const alreadyOff of [false, true])
-    it(`manual selection invalidates recovery${alreadyOff ? " even when already off" : ""}`, async () => {
-      const h = await harness({
-        config: config({
-          routes: {
-            quick: [target("quick"), target("next")],
-            standard: [target("standard")],
-            deep: [target("deep")],
-          },
-        }),
-      });
-
-      await h.input();
-      // Seed a genuine failure too: external selection must clear existing recovery eligibility.
-      await h.emit("message_end", {
-        message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
-      });
-
-      if (alreadyOff) await h.command("off");
-      await h.emit("model_select", { model: model("deep"), source: "cycle" });
-      await h.emit("message_end", {
-        message: { role: "assistant", provider: "fixture", model: "deep", stopReason: "error" },
-      });
-      await h.emit("agent_settled");
-      await h.command("recover");
-      assert.deepEqual(h.selections, ["quick"]);
-      assert.equal(h.decisions().length, 1);
-      assert.deepEqual(h.sent, []);
-      // A delayed failure from A must not resurrect its discarded chain either.
-      await h.emit("message_end", {
-        message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
-      });
-      await h.command("recover");
-      assert.deepEqual(h.selections, ["quick"]);
-    });
-
-  for (const failed of [
-    { provider: "fixture", model: "deep" },
-    { provider: "other-provider", model: "quick" },
-    {},
-  ])
-    it(`unmatched failure cannot enable recovery: ${JSON.stringify(failed)}`, async () => {
-      const h = await harness({
-        config: config({
-          routes: {
-            quick: [target("quick"), target("next")],
-            standard: [target("standard")],
-            deep: [target("deep")],
-          },
-        }),
-      });
-
-      await h.input();
-      await h.emit("message_end", {
-        message: { role: "assistant", ...failed, stopReason: "error" },
-      });
-      const notices = h.notifications.length;
-      await h.emit("agent_settled");
-      assert.equal(
-        h.notifications.length,
-        notices,
-        "unrelated failures must not advertise recovery",
-      );
-      await h.command("recover");
-      assert.deepEqual(h.selections, ["quick"]);
-      assert.equal(h.decisions().length, 1);
-      assert.deepEqual(h.sent, []);
-    });
 
   for (const command of ["on", "shadow"]) {
     for (const interruption of ["off", "shutdown"])
@@ -785,29 +775,6 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
         assert.deepEqual(h.selections, []);
       });
   }
-
-  it("a delayed check confirmation after shutdown does not classify or publish", async () => {
-    const dialog = deferred<boolean>();
-    const asked = deferred<void>();
-
-    const h = await harness({
-      confirm: () => {
-        asked.resolve();
-
-        return dialog.promise;
-      },
-    });
-
-    const check = h.command("check");
-    await asked.promise;
-    await h.emit("session_shutdown");
-    const published = [h.entries.length, h.statuses.length, h.notifications.length];
-    dialog.resolve(true);
-    await check;
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
-    assert.equal(h.terminal.size, 0);
-  });
 
   it("off preserves the input lock until a noncancellable setter actually settles", async () => {
     const entered = deferred<void>();
@@ -872,6 +839,266 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       assert.equal(h.terminal.size, 0);
     });
 
+  for (const mode of ["tui", "rpc"] as const)
+    it(`doctor applies disk settings and checks automatically while off in ${mode}`, async () => {
+      let disk = config({ mode: "off" });
+
+      const h = await harness({
+        mode,
+        load: async () => disk,
+        confirm: unusedHostMethod,
+      });
+
+      disk = config({ mode: "auto", minConfidence: 0.8, allowHeadless: false });
+      await h.command("doctor");
+      assert.equal(h.classifications.length, 1);
+      const state = h.classifications[0][1];
+      assert.ok(state.current_request.length > 0);
+      assert.notEqual(state.current_request, PROMPT);
+      assert.deepEqual(state.recent_conversation, []);
+      assert.deepEqual(await h.input(), { action: "continue" });
+      assert.equal(h.classifications.length, 1);
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+      assert.deepEqual(h.decisions(), []);
+      const report = h.notifications.at(-1)!;
+      assert.match(report, /pi-typesafe-router: doctor/i);
+      assert.match(report, /config:.*(?:applied|loaded|refreshed)/i);
+      assert.match(report, /routing: off/i);
+      assert.match(report, /classifier check:.*(?:ok|success|passed)/i);
+      assert.match(report, /local/i);
+      assert.match(report, /generation|probe/i);
+    });
+
+  for (const failure of ["missing", "error"] as const)
+    it(`doctor disables routing on ${failure} config without classifying`, async () => {
+      let reads = 0;
+
+      const h = await harness({
+        load: async () => {
+          if (++reads === 1) return config();
+
+          if (failure === "error") throw new Error(`${SECRET} ${PROMPT}`);
+
+          return undefined;
+        },
+      });
+
+      await h.command("doctor");
+      const report = h.notifications.at(-1)!;
+      assert.match(report, failure === "missing" ? /missing/i : /error|invalid|failed/i);
+      assert.match(report, /routing: off/i);
+      assert.match(report, /next:/i);
+      assert.equal(h.classifications.length, 0);
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+      assert.ok(!report.includes(SECRET));
+      assert.ok(!report.includes(PROMPT));
+    });
+
+  for (const code of ["credentials", "http", "network"] as const)
+    it(`doctor reports safe ${code} failure without exposing raw errors`, async () => {
+      const h = await harness({
+        classify: async () => {
+          const error = new ClassifierError(code, code === "http" ? 401 : undefined);
+          error.message = `${SECRET} ${PROMPT}`;
+          throw error;
+        },
+      });
+
+      await h.command("doctor");
+      const report = h.notifications.at(-1)!;
+      assert.match(report, /classifier check:.*(?:failed|error)/i);
+      assert.match(report, new RegExp(code, "i"));
+      assert.match(report, /next:/i);
+
+      if (code === "http") assert.match(report, /401/);
+      assert.ok(!report.includes(SECRET));
+      assert.ok(!report.includes(PROMPT));
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+    });
+
+  it("doctor timeout aborts the synthetic check and ignores late success", async () => {
+    const pending = deferred<Classification>();
+
+    const h = await harness({
+      config: config({ timeoutMs: 100 }),
+      classify: () => pending.promise,
+    });
+
+    await h.command("doctor");
+    assert.equal(h.classifications[0][2].signal.aborted, true);
+    assert.match(h.notifications.at(-1)!, /timeout|timed out/i);
+    const published = h.notifications.length;
+    pending.resolve(classification());
+    await nextTurn();
+    assert.equal(h.notifications.length, published);
+    assert.deepEqual(h.selections, []);
+    assert.deepEqual(h.sent, []);
+  });
+
+  for (const interruption of ["off", "escape", "shutdown"] as const)
+    it(`${interruption} invalidates doctor classification without late UI`, async () => {
+      const entered = deferred<void>();
+      const pending = deferred<Classification>();
+
+      const h = await harness({
+        classify: () => {
+          entered.resolve();
+
+          return pending.promise;
+        },
+      });
+
+      const doctor = h.command("doctor");
+      await entered.promise;
+
+      if (interruption === "off") await h.command("off");
+      else if (interruption === "escape") h.escape();
+      else await h.emit("session_shutdown");
+      await doctor;
+      assert.equal(h.classifications[0][2].signal.aborted, true);
+      const published = [h.notifications.length, h.statuses.length, h.entries.length];
+      pending.resolve(classification());
+      await nextTurn();
+      assert.deepEqual([h.notifications.length, h.statuses.length, h.entries.length], published);
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+    });
+
+  it("doctor holds the lock through classification; status observes without cancelling", async () => {
+    const entered = deferred<void>();
+    const pending = deferred<Classification>();
+
+    const h = await harness({
+      classify: () => {
+        entered.resolve();
+
+        return pending.promise;
+      },
+    });
+
+    const doctor = h.command("doctor");
+    await entered.promise;
+    await h.command("doctor");
+    assert.equal(h.classifications.length, 1);
+    assert.deepEqual(await h.input(), { action: "handled" });
+    await h.command("status");
+    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
+    assert.match(h.notifications.at(-1)!, /(?:activity|pending):.*(?:doctor|classif)/i);
+    assert.equal(h.classifications[0][2].signal.aborted, false);
+    pending.resolve(classification());
+    await doctor;
+    assert.match(h.notifications.at(-1)!, /classifier check:.*(?:ok|success|passed)/i);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("status during a delayed doctor read neither cancels nor applies its own disk snapshot", async () => {
+    const read = deferred<RouterConfig>();
+    const entered = deferred<void>();
+    let reads = 0;
+
+    const h = await harness({
+      load: async () => {
+        reads++;
+
+        if (reads === 1) return config({ mode: "off" });
+
+        if (reads === 2) {
+          entered.resolve();
+
+          return read.promise;
+        }
+
+        return config({ mode: "auto" });
+      },
+    });
+
+    const doctor = h.command("doctor");
+    await entered.promise;
+    await h.command("status");
+    assert.equal(reads, 2);
+    assert.match(h.notifications.at(-1)!, /not compared while an operation is running/i);
+    assert.match(h.notifications.at(-1)!, /routing: off/i);
+    assert.match(h.notifications.at(-1)!, /activity:.*(?:doctor|read|config)/i);
+    assert.equal(h.classifications.length, 0);
+    read.resolve(config({ mode: "auto" }));
+    await doctor;
+    assert.equal(h.classifications.length, 1);
+    assert.match(h.notifications.at(-1)!, /classifier check:.*(?:ok|success|passed)/i);
+    assert.match(h.notifications.at(-1)!, /routing: off/i);
+  });
+
+  it("status rereads disk without applying edits or changing the active mode", async () => {
+    let reads = 0;
+    let disk = config();
+
+    const h = await harness({
+      load: async () => {
+        reads++;
+
+        return disk;
+      },
+    });
+
+    disk = config({ mode: "off", defaultRoute: "deep" });
+    await h.command("status");
+    assert.equal(reads, 2);
+    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
+    assert.match(h.notifications.at(-1)!, /unapplied|changed|differ/i);
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.entries, []);
+    await h.command("doctor");
+    await h.command("status");
+    assert.match(h.notifications.at(-1)!, /(?:matches|unchanged|in sync|applied)/i);
+    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
+  });
+
+  for (const command of ["reload", "validate", "check", "cancel", "recover"])
+    it(`removed ${command} gives guidance without effects`, async () => {
+      let reads = 0;
+
+      const h = await harness({
+        load: async () => {
+          reads++;
+
+          return config();
+        },
+      });
+
+      const before = [h.entries.length, h.statuses.length];
+      await h.command(command);
+      assert.match(h.notifications.at(-1)!, /removed/i);
+      assert.match(
+        h.notifications.at(-1)!,
+        command === "recover" ? /\/model/ : command === "cancel" ? /off|Escape/i : /doctor/i,
+      );
+      assert.equal(reads, 1);
+      assert.deepEqual([h.entries.length, h.statuses.length], before);
+      assert.equal(h.classifications.length, 0);
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+    });
+
+  for (const command of ["on", "shadow"] as const)
+    it(`${command} cannot enable RPC routing just because a UI facade exists`, async () => {
+      const h = await harness({
+        mode: "rpc",
+        config: config({ mode: "off", allowHeadless: false }),
+        confirm: unusedHostMethod,
+      });
+
+      await h.command("doctor");
+      assert.match(h.notifications.at(-1)!, /allowHeadless is false/);
+      assert.doesNotMatch(h.notifications.at(-1)!, /next: \/typesafe-router on/);
+      await h.command(command);
+      assert.match(h.notifications.at(-1)!, /disabled in this interface/);
+      assert.deepEqual(await h.input(), { action: "continue" });
+      assert.equal(h.classifications.length, 1);
+      assert.deepEqual(h.selections, []);
+    });
+
   it("successful decisions contain neither credentials nor the raw prompt", async () => {
     const h = await harness();
     await h.input();
@@ -882,4 +1109,266 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.ok(!persisted.includes(SECRET));
     assert.ok(!persisted.includes(PROMPT));
   });
+});
+
+describe("generation readiness gate", { timeout: 3000 }, () => {
+  for (const mode of ["auto", "shadow"] as const)
+    it(`${mode} startup blocks input and enabling until doctor succeeds`, async () => {
+      const h = await harness({ unverified: true, config: config({ mode }) });
+      assert.deepEqual(await h.input(), { action: "handled" });
+      await h.command(mode === "auto" ? "on" : "shadow");
+      assert.match(h.notifications.join("\n"), /doctor/i);
+      assert.equal(h.classifications.length, 0);
+      assert.deepEqual(h.selections, []);
+      await h.command("doctor");
+      await h.command(mode === "auto" ? "on" : "shadow");
+      assert.deepEqual(await h.input(), { action: "continue" });
+      assert.equal(h.classifications.length, 2);
+    });
+
+  it("one failed route blocks all routing even when the selected route passed", async () => {
+    const h = await harness({
+      unverified: true,
+      probeGeneration: async (_registry, candidate) => ({
+        target: candidate,
+        passed: candidate.model !== "deep",
+        reason: "synthetic",
+        milliseconds: 0,
+      }),
+    });
+
+    await h.command("doctor");
+    await h.command("on");
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.equal(h.classifications.length, 1);
+    assert.deepEqual(h.selections, []);
+    assert.match(h.notifications.join("\n"), /deep/);
+  });
+
+  it("one valid fallback per route unlocks, deduplicates probes and skips failed first candidates", async () => {
+    const chain = [target("quick"), target("next")];
+
+    const h = await harness({
+      unverified: true,
+      config: config({ routes: { quick: chain, standard: chain, deep: chain } }),
+      probeGeneration: async (_registry, candidate) => ({
+        target: candidate,
+        passed: candidate.model === "next",
+        reason: "synthetic",
+        milliseconds: 0,
+      }),
+    });
+
+    await h.command("doctor");
+    assert.deepEqual(
+      h.probes.map((args) => args[1].model),
+      ["quick", "next"],
+    );
+    assert.ok(h.probes.every((args) => args[3] === 15000));
+    await h.command("on");
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["next"]);
+    assert.equal(h.probes.length, 2, "routing must use proof, not run probes again");
+  });
+
+  it("a passed but locally unavailable candidate cannot establish readiness", async () => {
+    const h = await harness({ unverified: true, available: [model("quick"), model("standard")] });
+    await h.command("doctor");
+    await h.command("on");
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.deepEqual(h.selections, []);
+    assert.equal(h.classifications.length, 1);
+  });
+
+  for (const change of [
+    "mapping",
+    "classifier reference",
+    "provider reference",
+    "auth source",
+    "descriptor",
+  ] as const)
+    it(`${change} changes invalidate proof before input without classifying`, async () => {
+      let disk = config();
+      const h = await harness({ load: async () => disk });
+
+      if (change === "mapping")
+        disk = config({ routes: { ...disk.routes, quick: [target("next")] } });
+
+      if (change === "classifier reference")
+        disk = config({
+          backend: {
+            type: "typesafe",
+            model: "jev-1.13.0",
+            auth: { source: "env", variable: "OTHER_FIXTURE_KEY" },
+          },
+        });
+
+      if (change === "provider reference")
+        h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({
+          apiKey: "CHANGED_KEY_REFERENCE",
+        });
+
+      if (change === "auth source")
+        h.ctx.modelRegistry.getProviderAuthStatus = () => ({
+          configured: true,
+          source: "models_json_key",
+        });
+
+      if (change === "descriptor")
+        h.ctx.modelRegistry.getAll()[0].baseUrl = "https://changed.invalid";
+      assert.deepEqual(await h.input(), { action: "handled" });
+      assert.equal(h.classifications.length, 0);
+      assert.deepEqual(h.selections, []);
+      assert.match(h.notifications.at(-1)!, /doctor/i);
+      assert.ok(!JSON.stringify(h.entries).includes("CHANGED_KEY_REFERENCE"));
+    });
+
+  it("on rechecks disk before enabling a previously verified off session", async () => {
+    let disk = config({ mode: "off" });
+    const h = await harness({ load: async () => disk });
+    disk = config({ mode: "off", minConfidence: 0.9 });
+    await h.command("on");
+    assert.match(h.notifications.at(-1)!, /doctor/i);
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("input verification reads disk abortably and ignores late config", async () => {
+    let pause = false;
+    const entered = deferred<void>();
+    const pending = deferred<RouterConfig>();
+
+    const h = await harness({
+      load: async () => {
+        if (!pause) return config();
+        entered.resolve();
+
+        return pending.promise;
+      },
+    });
+
+    pause = true;
+    const input = h.input();
+    await entered.promise;
+    await h.command("off");
+    assert.deepEqual(await input, { action: "handled" });
+    pending.resolve(config());
+    await nextTurn();
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("successful generation probes do not override a failed classifier check", async () => {
+    const h = await harness({
+      unverified: true,
+      classify: async () => {
+        throw new ClassifierError("credentials");
+      },
+    });
+
+    await h.command("doctor");
+    assert.equal(h.probes.length, 3);
+    await h.command("on");
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.equal(h.classifications.length, 1);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("a separate classifier credential reference invalidates generation readiness", async () => {
+    const h = await harness({
+      config: config({
+        backend: {
+          type: "typesafe",
+          model: "jev-1.13.0",
+          auth: { source: "pi", provider: "classifier-fixture" },
+        },
+      }),
+    });
+
+    h.ctx.modelRegistry.getRegisteredProviderConfig = (provider) => ({
+      apiKey: provider === "classifier-fixture" ? "changed-reference" : SECRET,
+    });
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("scope changes block routing when any route loses its verified candidate", async () => {
+    const h = await harness();
+    h.ctx.scopedModels = [
+      { model: model("quick"), thinkingLevel: "off" },
+      { model: model("standard"), thinkingLevel: "off" },
+    ];
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.match(h.notifications.at(-1)!, /deep/);
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("context growth rechecks eligibility of every verified route", async () => {
+    const h = await harness({
+      models: [model("quick"), model("standard"), { ...model("deep"), contextWindow: 30_000 }],
+    });
+
+    h.ctx.getContextUsage = () => ({ tokens: 35_000, contextWindow: 128_000, percent: 27 });
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.match(h.notifications.at(-1)!, /deep/);
+    assert.equal(h.classifications.length, 0);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("off preserves completed proof and a new session clears it", async () => {
+    const h = await harness();
+    await h.command("off");
+    await h.command("on");
+    await h.input();
+    assert.deepEqual(h.selections, ["quick"]);
+    await h.emit("session_start");
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.equal(h.classifications.length, 1);
+  });
+
+  for (const interruption of ["off", "shutdown", "disk change"] as const)
+    it(`${interruption} during generation probe cannot publish stale readiness`, async () => {
+      const entered = deferred<void>();
+      const pending = deferred<Awaited<ReturnType<typeof probeGeneration>>>();
+      let disk = config();
+
+      const h = await harness({
+        unverified: true,
+        load: async () => disk,
+        probeGeneration: async (_registry, candidate) => {
+          if (candidate.model === "quick") {
+            entered.resolve();
+
+            return pending.promise;
+          }
+
+          return { target: candidate, passed: true, reason: "ok", milliseconds: 0 };
+        },
+      });
+
+      const doctor = h.command("doctor");
+      await entered.promise;
+
+      if (interruption === "off") await h.command("off");
+      else if (interruption === "shutdown") await h.emit("session_shutdown");
+      else disk = config({ minConfidence: 0.9 });
+
+      if (interruption !== "disk change") {
+        await doctor;
+        assert.equal(h.probes[0][2].aborted, true);
+      }
+
+      pending.resolve({ target: target("quick"), passed: true, reason: "ok", milliseconds: 0 });
+      await doctor;
+      await nextTurn();
+
+      if (interruption === "shutdown") await h.emit("session_start");
+      await h.command("on");
+      await h.input();
+      assert.deepEqual(h.selections, []);
+      assert.match(h.notifications.join("\n"), /doctor/i);
+    });
 });
