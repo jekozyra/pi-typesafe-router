@@ -6,6 +6,7 @@
     "type": "cloudflare",
     "model": "typesafe/jev",
     "accountId": "00000000000000000000000000000000",
+    "gatewayId": "replace-with-your-gateway-slug",
     "auth": {
       "source": "env",
       "variable": "CLOUDFLARE_API_TOKEN"

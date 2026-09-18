@@ -12,7 +12,13 @@ export type CredentialSource =
 
 export type Backend =
   | { type: "typesafe"; model: string; auth: CredentialSource }
-  | { type: "cloudflare"; model: "typesafe/jev"; accountId: string; auth: CredentialSource }
+  | {
+      type: "cloudflare";
+      model: "typesafe/jev";
+      accountId: string;
+      gatewayId: string;
+      auth: CredentialSource;
+    }
   | {
       type: "vercel";
       model: "typesafe-ai/jev";

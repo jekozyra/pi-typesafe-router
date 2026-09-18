@@ -71,18 +71,27 @@ Character limits use JavaScript string length. The current request is never trun
 
 Requests go to `https://api.typesafe.ai/v1/systemone`. The versioned model ID is the default; explicitly configured aliases may change behavior over time. No automatic retries occur.
 
-### Cloudflare Workers AI
+### Cloudflare AI Gateway
 
 ```json
 {
   "type": "cloudflare",
   "accountId": "0123456789abcdef0123456789abcdef",
+  "gatewayId": "your-gateway-slug",
   "model": "typesafe/jev",
   "auth": { "source": "env", "variable": "CLOUDFLARE_API_TOKEN" }
 }
 ```
 
-Use your own 32-hex-character account ID and a token authorized for Workers AI. The fixed account-scoped REST endpoint is `https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/run`. This is Workers AI evaluation, not arbitrary Cloudflare AI Gateway chat compatibility.
+Use your own 32-hex-character account ID and an explicit AI Gateway ID (slug). Existing Cloudflare configurations must add `gatewayId`; missing IDs reject the configuration rather than silently using the account's default gateway.
+
+Jev uses [AI Gateway's universal REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) at `https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/run`, with `cf-aig-gateway-id` selecting your gateway. The body remains `{model, input: {state, questions}}`; this is evaluation, not chat completions or `/compat`.
+
+This endpoint requires an account-scoped Cloudflare API token with **Workers AI Read**, sent as `Authorization: Bearer`. Despite the permission name, this is the documented Gateway universal route. AI-Gateway-only permissions are insufficient; `cf-aig-authorization` belongs to a different transport. If reusing Pi's `cloudflare-ai-gateway` credential, verify it also grants Workers AI Read for this account. Alternatively set `auth.variable` to `CLOUDFLARE_API_KEY` to use Pi's usual environment variable name.
+
+For managed inference, enable authentication on the selected gateway and fund [Unified Billing](https://developers.cloudflare.com/ai-gateway/features/unified-billing/). Stored provider credentials can take precedence; review the gateway's credential requirements. No TypeSafe key is required for managed billing.
+
+Requests set `cf-aig-collect-log: false`, `cf-aig-skip-cache: true`, and `cf-aig-max-attempts: 1`. These request disabled Gateway logging/cache and bounded attempts, not guaranteed upstream zero retention or a verified no-replay guarantee. The caller's abort deadline still applies. Live response envelopes, permissions, billing, and Gateway control behavior remain unverified.
 
 ### Vercel AI Gateway
 
@@ -95,7 +104,9 @@ Use your own 32-hex-character account ID and a token authorized for Workers AI. 
 }
 ```
 
-This uses AI SDK `experimental_evaluate`, pinned to SDK `7.0.105`, and the Gateway evaluation model interface. No OpenAI-compatible chat endpoint is involved. `zeroDataRetention` defaults to true; the provider may reject unsupported retention options instead of silently weakening them.
+Authentication is API-key-only: set `AI_GATEWAY_API_KEY` or use `auth: {"source":"pi","provider":"vercel-ai-gateway"}` to reuse a key stored via Pi's `/login`. The router does not discover Vercel OIDC tokens, pull environment files, or refresh project tokens.
+
+This uses AI SDK `experimental_evaluate`, pinned to SDK `7.0.105`, and the Gateway evaluation model interface. No OpenAI-compatible chat endpoint is involved. `zeroDataRetention` defaults to true. Vercel rejected this option on Hobby in our standalone test because it requires Pro or Enterprise. Set it to false only if you accept the weaker retention policy; the router never silently disables it.
 
 Confidence is read from the per-question `providerMetadata.typesafe.confidence.task_class` map. Public documentation identifies the enclosing confidence metadata but does not demonstrate its full shape. Missing confidence remains missing and selects `uncertainRoute`; malformed confidence fails validation and selects `defaultRoute`. Run `/typesafe-router doctor` with your account before relying on this experimental integration. No live service parity is claimed.
 

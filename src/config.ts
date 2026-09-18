@@ -45,6 +45,7 @@ const backend = z.discriminatedUnion("type", [
         .string()
         .length(32)
         .regex(/^[a-fA-F0-9]{32}$/u),
+      gatewayId: identifier,
       auth: auth.default(envAuth("CLOUDFLARE_API_TOKEN")),
     })
     .strict(),

@@ -8,7 +8,13 @@ const auth = { source: "env", variable: "UNUSED" } as const;
 
 const backends: Backend[] = [
   { type: "typesafe", model: "jev-1.13.0", auth },
-  { type: "cloudflare", model: "typesafe/jev", accountId: "account", auth },
+  {
+    type: "cloudflare",
+    model: "typesafe/jev",
+    accountId: "account",
+    gatewayId: "router-test",
+    auth,
+  },
   { type: "vercel", model: "typesafe-ai/jev", zeroDataRetention: true, auth },
 ];
 
@@ -70,11 +76,21 @@ for (const backend of backends) {
       assert.equal(headers.get("authorization"), "Bearer secret-key");
       const body = z.json().parse(JSON.parse(String(init?.body)));
 
+      if (backend.type !== "cloudflare") {
+        assert.equal(headers.get("cf-aig-gateway-id"), null);
+        assert.equal(headers.get("cf-aig-collect-log"), null);
+      }
+
       if (backend.type === "typesafe") {
         assert.equal(String(url), "https://api.typesafe.ai/v1/systemone");
         assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
       } else if (backend.type === "cloudflare") {
         assert.equal(String(url), "https://api.cloudflare.com/client/v4/accounts/account/ai/run");
+        assert.equal(headers.get("cf-aig-gateway-id"), "router-test");
+        assert.equal(headers.get("cf-aig-collect-log"), "false");
+        assert.equal(headers.get("cf-aig-skip-cache"), "true");
+        assert.equal(headers.get("cf-aig-max-attempts"), "1");
+        assert.equal(headers.get("cf-aig-authorization"), null);
         assert.deepEqual(body, {
           model: backend.model,
           input: { state, questions: { task_class: RUBRIC } },
@@ -82,6 +98,7 @@ for (const backend of backends) {
       } else {
         assert.equal(String(url), "https://ai-gateway.vercel.sh/v4/ai/evaluation-model");
         assert.equal(headers.get("ai-model-id"), backend.model);
+        assert.equal(headers.get("ai-gateway-auth-method"), "api-key");
         assert.deepEqual(body, {
           state,
           questions: { task_class: RUBRIC },

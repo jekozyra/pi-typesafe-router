@@ -2,7 +2,7 @@
 
 An opt-in [Pi](https://github.com/earendil-works/pi) extension that asks Jev to classify a task, then selects a generation model from your ordered mappings.
 
-Classification supports **TypeSafe direct, Cloudflare Workers AI, and Vercel AI Gateway**. Model fallback happens only before generation. A failed task is never automatically replayed by this extension.
+Classification supports **TypeSafe direct, Cloudflare AI Gateway, and Vercel AI Gateway**. Model fallback happens only before generation. A failed task is never automatically replayed by this extension.
 
 ## Setup
 
@@ -52,11 +52,11 @@ After a failed generation, use Pi's `/model` to choose a model, inspect complete
 
 See the [configuration reference](docs/configuration.md) and examples for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), and [Vercel](examples/vercel.json). Only the global file is read; `PI_CODING_AGENT_DIR` relocates it. Project-local configuration is intentionally ignored.
 
-| Backend               | Credential                                   | Model             |
-| --------------------- | -------------------------------------------- | ----------------- |
-| TypeSafe              | `TYPESAFE_API_KEY`                           | `jev-1.13.0`      |
-| Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN`, account ID in config | `typesafe/jev`    |
-| Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                         | `typesafe-ai/jev` |
+| Backend               | Credential                                                | Model             |
+| --------------------- | --------------------------------------------------------- | ----------------- |
+| TypeSafe              | `TYPESAFE_API_KEY`                                        | `jev-1.13.0`      |
+| Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN`, account and gateway IDs in config | `typesafe/jev`    |
+| Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                                      | `typesafe-ai/jev` |
 
 Backends are explicit; there is no cross-backend failover. Vercel uses the experimental AI SDK evaluation protocol, not a chat-completions endpoint. Missing confidence uses the conservative route; confidence is **not** the probability that the generation model will solve your task.
 

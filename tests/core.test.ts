@@ -43,13 +43,14 @@ test("strict config has safe defaults and preserves slash-containing model IDs",
 test("backend defaults, explicit pi credentials, and fixed gateway models", () => {
   const cloudflare = parseConfig({
     ...minimal(),
-    backend: { type: "cloudflare", accountId: "aB12".repeat(8) },
+    backend: { type: "cloudflare", accountId: "aB12".repeat(8), gatewayId: "router-test" },
   }).backend;
 
   assert.deepEqual(cloudflare, {
     type: "cloudflare",
     model: "typesafe/jev",
     accountId: "aB12".repeat(8),
+    gatewayId: "router-test",
     auth: { source: "env", variable: "CLOUDFLARE_API_TOKEN" },
   });
   assert.deepEqual(parseConfig({ ...minimal(), backend: { type: "vercel" } }).backend, {
@@ -67,6 +68,13 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
 
   for (const backend of [
     { type: "cloudflare" },
+    { type: "cloudflare", accountId: "a".repeat(32) },
+    ...["", "bad\r\nheader", " bad", "bad ", "x".repeat(513)].map((gatewayId) => ({
+      type: "cloudflare",
+      accountId: "a".repeat(32),
+      gatewayId,
+    })),
+    { type: "vercel", auth: { source: "vercel-oidc" } },
     { type: "cloudflare", accountId: "g".repeat(32) },
     { type: "cloudflare", accountId: "a".repeat(31) },
     { type: "cloudflare", accountId: "a".repeat(32), model: "other" },

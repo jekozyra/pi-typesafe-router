@@ -1020,6 +1020,13 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
         if (!permitted() || (backend === "cloudflare" && !accountId)) return;
 
+        const gatewayId =
+          backend === "cloudflare"
+            ? await ctx.ui.input("Cloudflare AI Gateway ID (gateway slug, not an API token)")
+            : undefined;
+
+        if (!permitted() || (backend === "cloudflare" && !gatewayId)) return;
+
         const models = ctx.modelRegistry
           .getAvailable()
           .filter((model) => !["auto", "smart-router", "typesafe-router"].includes(model.provider));
@@ -1041,7 +1048,10 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
           const initial = parseConfig({
             version: 1,
-            backend: backend === "cloudflare" ? { type: backend, accountId } : { type: backend },
+            backend:
+              backend === "cloudflare"
+                ? { type: backend, accountId, gatewayId }
+                : { type: backend },
             routes: { quick: [target], standard: [target], deep: [target] },
           });
 

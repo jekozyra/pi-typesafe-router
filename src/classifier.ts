@@ -237,9 +237,21 @@ export function createClassifier(
           ? { model: backend.model, state, questions }
           : { model: backend.model, input: { state, questions } };
 
+      const headers = new Headers({
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      });
+
+      if (backend.type === "cloudflare") {
+        headers.set("cf-aig-gateway-id", backend.gatewayId);
+        headers.set("cf-aig-collect-log", "false");
+        headers.set("cf-aig-skip-cache", "true");
+        headers.set("cf-aig-max-attempts", "1");
+      }
+
       const response = await guardedFetch(url, {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       });
 

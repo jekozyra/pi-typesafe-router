@@ -17,7 +17,7 @@ Doctor must complete successfully, including the classifier check, and establish
 ## Recipients and retention
 
 - Direct: TypeSafe's API.
-- Cloudflare: your account's Workers AI endpoint and its upstream service arrangement.
+- Cloudflare: AI Gateway's account-scoped universal REST endpoint, with your explicitly selected gateway and upstream service arrangement. Requests disable Gateway log collection and cache use; these controls do not establish upstream zero data retention. Gateway attempt behavior remains subject to live verification.
 - Vercel: AI Gateway and its upstream service arrangement. The request explicitly enables `zeroDataRetention` by default.
 
 The router never silently changes classification backends, follows HTTP redirects, or retries classification. A failed classifier uses a local configured generation route instead. Generation content goes to the model provider selected in Pi, under that provider's normal settings. Doctor also sends synthetic probe content to every distinct configured generation target through Pi's `modelRegistry.complete`, including custom endpoints and their normal provider arrangements.
