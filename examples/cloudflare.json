@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "mode": "off",
+  "allowHeadless": false,
+  "backend": {
+    "type": "cloudflare",
+    "model": "typesafe/jev",
+    "accountId": "00000000000000000000000000000000",
+    "auth": {
+      "source": "env",
+      "variable": "CLOUDFLARE_API_TOKEN"
+    }
+  },
+  "timeoutMs": 1500,
+  "minConfidence": 0.8,
+  "maxContextChars": 12000,
+  "historyMessages": 4,
+  "outputReserveTokens": 8192,
+  "routes": {
+    "quick": [
+      {
+        "provider": "REPLACE_WITH_PI_PROVIDER",
+        "model": "REPLACE_WITH_QUICK_MODEL_ID"
+      }
+    ],
+    "standard": [
+      {
+        "provider": "REPLACE_WITH_PI_PROVIDER",
+        "model": "REPLACE_WITH_STANDARD_MODEL_ID"
+      }
+    ],
+    "deep": [
+      {
+        "provider": "REPLACE_WITH_PI_PROVIDER",
+        "model": "REPLACE_WITH_DEEP_MODEL_ID"
+      }
+    ]
+  },
+  "defaultRoute": "deep",
+  "uncertainRoute": "deep"
+}

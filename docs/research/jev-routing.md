@@ -1,7 +1,13 @@
 # Jev-powered model routing for Pi
 
 Created: 2026-09-17
-Status: Research complete; proposed approach awaits scope approval. No extension implemented or benchmarked.
+Status: Historical research complete; v1 scope approved and local implementation present. Research is not live compatibility or benchmark evidence.
+
+## Implementation decision — 2026-09-17 (local date)
+
+The approved [v1 plan](../plans/v1.md) supersedes the original direct-only launch recommendation: v1 includes **direct TypeSafe, Cloudflare Workers AI, and Vercel AI Gateway**, with one explicitly selected classification backend and no automatic backend failover. Generation uses ordered preflight candidate fallbacks, **no automatic replay**, and explicit recovery that selects a later eligible model without sending a message. These decisions are reflected in [`config.ts`](../../src/config.ts), [`classifier.ts`](../../src/classifier.ts), and [`index.ts`](../../src/index.ts).
+
+We retain the research evidence, sources, and unresolved caveats below. Implementation and synthetic tests do not establish live backend compatibility. In particular, Vercel's documented confidence metadata location does not prove the per-question shape assumed by the adapter; missing confidence remains conservative (§1.6).
 
 ## Objective
 
@@ -9,7 +15,7 @@ Build a small, public Pi extension that uses TypeSafe's Jev to classify requests
 
 **Recommended name: `pi-typesafe-router`.** The npm registry returned HTTP 404 for this name during research. This is an availability observation, not a reservation or trademark clearance. `pi-jev-router` is already taken by a relevant MIT-licensed project published on 2026-09-17. Do not publish a confusingly named copy. [N1, N2]
 
-This report lives outside a Git repository until we approve the name and implementation scope. No extension code, credentials, installation settings, or existing router configuration was changed. We made no paid classification or generation calls.
+At the original research stage, this report lived outside a Git repository pending name and scope approval. That research changed no extension code, credentials, installation settings, or existing router configuration, and made no paid classification or generation calls. This repository copy now records the subsequent v1 decisions; the original research remains historical evidence.
 
 ## Executive recommendation
 
@@ -135,21 +141,23 @@ Published limits are 250,000 tokens/second and 1,200 requests/minute, explicitly
 
 The multi-model evidence review independently reinforced the main limits: neither typed output nor confident labels prove downstream success; the article has four unique examples; latency is not an SLA; and account-specific retention needs clarification. Its bounded review did not inspect SDK internals, legal agreements, or Pi. Those gaps are covered separately above/below where we directly inspected the relevant sources; they must not be mistaken for live verification.
 
-### 1.6 Future backends: direct TypeSafe, Cloudflare, and Vercel
+### 1.6 Confirmed v1 backends: direct TypeSafe, Cloudflare, and Vercel
 
-**Confirmed direction after research:** implement direct TypeSafe first, but isolate classification transport and authentication behind a small adapter. We may add gateways or reuse Pi-managed credentials later without changing routing policy. Do not add unimplemented backend choices to the public config.
+**Superseded recommendation:** the original advice was to launch direct TypeSafe first and defer gateway adapters and Pi-managed credential reuse. The approved v1 plan includes all three backends. The implementation selects one backend through `backend.type` (`typesafe`, `cloudflare`, or `vercel`); it never switches classification backends automatically. Each backend supports an explicit environment credential source or explicitly configured Pi provider credential reuse. This keeps routing policy separate from transport without silently changing data recipients or billing.
 
 The additional official documentation confirms actual evaluation integrations, not merely listings in a chat-model catalogue:
 
 | Backend | Model identifier and invocation | Important adapter differences |
 | --- | --- | --- |
 | Direct TypeSafe (v1) | `jev-1.13.0`; `POST /v1/systemone` | `TYPESAFE_API_KEY`; Choice confidence in each answer; snake-case usage |
-| Cloudflare Workers AI (future) | `typesafe/jev`; `env.AI.run(...)` or documented account-scoped REST `/ai/run` with `{model,input}` | REST uses Cloudflare account ID and API token; examples preserve TypeSafe-style answers/confidence/usage; handle actual REST response envelope explicitly |
-| Vercel AI Gateway (future) | `typesafe-ai/jev`; AI SDK `experimental_evaluate` / `gateway.evaluationModel(...)` | Evaluation is SDK-only, not OpenAI/Anthropic/Cohere-compatible endpoints; standardized answers and camel-case usage; separate Jev confidence is in `providerMetadata.typesafe.confidence` |
+| Cloudflare Workers AI (v1) | `typesafe/jev`; `env.AI.run(...)` or documented account-scoped REST `/ai/run` with `{model,input}` | REST uses Cloudflare account ID and API token; examples preserve TypeSafe-style answers/confidence/usage; handle actual REST response envelope explicitly |
+| Vercel AI Gateway (v1) | `typesafe-ai/jev`; AI SDK `experimental_evaluate` / `gateway.evaluationModel(...)` | Evaluation is SDK-only, not OpenAI/Anthropic/Cohere-compatible endpoints; standardized answers and camel-case usage; separate Jev confidence is in `providerMetadata.typesafe.confidence` |
 
-Cloudflare's cited page is a **Workers AI model invocation**, not documentation that arbitrary Cloudflare AI Gateway chat proxies accept Jev evaluation. It lists a 32,000-token context and points to the dashboard for pricing. Its REST example uses Cloudflare credentials, not `TYPESAFE_API_KEY`; billing details and privacy guarantees need their own review before shipping that backend. [G1]
+Cloudflare's cited page is a **Workers AI model invocation**, not documentation that arbitrary Cloudflare AI Gateway chat proxies accept Jev evaluation. It lists a 32,000-token context and points to the dashboard for pricing. Its REST example uses Cloudflare credentials, not `TYPESAFE_API_KEY`; billing details and privacy guarantees still need their own review before shipping that backend. Including the adapter in approved v1 scope does not resolve those caveats. [G1]
 
 Vercel's announcement specifies AI SDK **7.0.105 onwards** for the experimental evaluation API. The detailed documentation explicitly excludes the usual compatible chat endpoints. Boolean replaces direct TypeSafe's Noul naming; Choice retains choice/probabilities but confidence is provider metadata rather than a standard answer field. The changelog documents per-request ZDR via `providerOptions.gateway.zeroDataRetention: true` and says Jev supports ZDR/No Training. That is a gateway-specific feature, not proof that a standard direct TypeSafe account has ZDR. [G2, G3]
+
+**Vercel confidence contract remains unproven.** The cited documentation locates confidence at `providerMetadata.typesafe.confidence`, but does not establish a per-question object such as `{ task_class: 0.9 }`. The implemented adapter conservatively reads only that object's `task_class` value: absent metadata or an absent question value leaves confidence unavailable; a supplied non-object map or invalid question value rejects the response. It does not invent confidence from the winning probability or the standard answer. Missing confidence takes the configured uncertainty route; invalid responses take the classifier-failure/default route. Synthetic fixtures can verify this extraction and fallback behavior, but cannot prove that live Vercel responses have the assumed shape. Live compatibility remains unverified.
 
 Adapter responsibilities:
 
@@ -163,7 +171,7 @@ Adapter responsibilities:
 
 Keep the request projection and rubric outside adapters so a transport change does not silently change classification policy. A fake classifier supports deterministic routing tests; backend fixtures verify translation and metadata extraction separately. No generic plugin framework is needed for v1.
 
-**Native Pi auth is credential reuse, not protocol compatibility.** A Pi model listing or a provider key alone does not supply an evaluation operation. Future Pi integration should resolve credentials through supported registry APIs and invoke an evaluation-capable adapter, rather than forcing Jev through `streamSimple` or chat completions.
+**Native Pi auth is credential reuse, not protocol compatibility.** A Pi model listing or a provider key alone does not supply an evaluation operation. The v1 implementation resolves explicitly configured Pi credentials through `getProviderAuth` and invokes an evaluation-capable adapter, rather than forcing Jev through `streamSimple` or chat completions. Credential reuse does not prove that a given provider's credentials are accepted by the selected backend.
 
 ## 2. What the supplied article proves, and what it does not
 
@@ -302,7 +310,7 @@ If transparent outage failover is a launch requirement, it is an additional requ
 
 A route contains a non-empty flat candidate list. Prefer lists over references between routes: no graph traversal, cycles, or implicit global tier downgrade. A repeated candidate is a validation error. A failed first candidate never authorizes use of a model outside the configured lists.
 
-Directional configuration, **not a shipped schema**. Replace the placeholder IDs using Pi's model picker; friendly names like Astra and Sol are not portable identifiers:
+Historical directional configuration, **not the implemented schema**. The approved implementation uses `mode` rather than `enabled`, an explicit `backend` object, and top-level `timeoutMs`; consult [`config.ts`](../../src/config.ts) and the repository examples for the current contract. We retain this sketch as the original proposal. Replace placeholder IDs using Pi's model picker; friendly names like Astra and Sol are not portable identifiers:
 
 ```json
 {
@@ -347,11 +355,11 @@ An unknown model identifier is normally a configuration error. A known but tempo
 
 ### 5.4 Configuration ownership
 
-Propose one global JSON file under Pi's resolved agent directory, not a hardcoded home path. Use an explicit setup command to create it; installation itself does not overwrite settings or enable routing. The key is **only `TYPESAFE_API_KEY` from the environment** in v1. Reuse Pi for destination-provider auth; do not create a parallel credential store.
+The approved implementation uses one global `typesafe-router.json` file under Pi's resolved agent directory, not a hardcoded home path. An explicit setup command creates it with routing off; installation itself does not overwrite settings or enable routing. **The original TypeSafe-environment-key-only recommendation is superseded.** Backend credential defaults are `TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN`, and `AI_GATEWAY_API_KEY`, respectively. Configuration can select another environment variable or explicit Pi provider auth; Cloudflare also requires an account ID. Reuse Pi for destination-provider auth; do not create a parallel credential store.
 
 Start global-only. Repo-local routing files can change where private code is sent. If we add project overrides later, require Pi project trust **and** an explicit global allowance, keep endpoints and secrets non-overridable, and report the effective source. Whole-list replacement is easier to reason about than deep-merging fallback arrays. Load changes atomically while idle; never use half of an invalid new file.
 
-Proposed command surface: one namespaced command, `/typesafe-router`, with `setup`, `on`, `off`, `status`, `validate`, and an explicitly networked `check`. Avoid colliding with the existing `/jev` extension. Support a shadow mode before enabling model changes. Do not add an LLM-callable tool that lets untrusted conversation content mutate the configuration.
+The implemented command surface is one namespaced command, `/typesafe-router`, with `setup [typesafe|cloudflare|vercel]`, `on`, `shadow`, `off`, `cancel`, `status`, `validate`, an explicitly networked `check`, `recover`, and `reload`. This avoids colliding with the existing `/jev` extension. After failed routed generation, `recover` selects the next eligible candidate and turns routing off; it sends no message. Inspect completed tools and explicitly continue. No LLM-callable tool lets untrusted conversation content mutate configuration.
 
 ## 6. Privacy, security, and commercial constraints
 
@@ -371,7 +379,7 @@ Propose:
 - Resolve references from recent text; if context is insufficient, use the uncertainty route. Avoid an extra summarizing LLM call in front of Jev.
 - No prompt cache or transcript logging in the extension. Persist only decisions, reason codes, latency, classifier version, and usage when available.
 - A local disabled mode makes zero Jev calls. “Shadow” mode still sends data and costs money; label it accordingly.
-- Restrict the TypeSafe origin in v1. Project config cannot redirect the key or prompt body to another server.
+- The original direct-TypeSafe-only origin restriction is superseded by the three approved backend transports. V1 exposes no arbitrary endpoint setting or project override that can redirect the key or prompt body; selecting a backend explicitly chooses its recipient.
 - Do not copy authorization headers, SDK errors with bodies, full configuration dumps, or environment variables into diagnostics.
 
 Simple redaction is not a security boundary. If organizational rules prohibit external classification, disable the extension for that workspace rather than pretending a regular expression proves safety.
@@ -455,9 +463,9 @@ Compare paired task outcomes and bootstrap confidence intervals at the **task/co
 - Measured classifier overhead fits the chosen UX budget; quality/spend results justify enabling routing for the tested workload.
 - Public performance claims and evaluation artifacts are cleared under TypeSafe terms.
 
-## 8. Straightforward build sequence to approve
+## 8. Historical proposed build sequence
 
-This is a proposed sequence, not an instruction to implement now. The integration findings determine which Pi seam is viable. The detailed implementation plan should be written after approving the runtime-fallback boundary and data disclosure policy.
+This was the research-stage sequence, not a current implementation checklist. The approved [v1 plan](../plans/v1.md) supersedes its direct-only adapter scope and pending-approval language. The integration findings and release caveats remain relevant; the table is not evidence that its exit conditions have passed.
 
 | Milestone | Deliverable | Exit condition |
 | --- | --- | --- |
@@ -468,9 +476,9 @@ This is a proposed sequence, not an instruction to implement now. The integratio
 | 5. Evaluate and harden | Private pilot corpus and sandbox task runs; tune rubric, deadline and uncertainty policy | Evidence supports an explicit quality/spend/latency trade-off; otherwise remain opt-in/shadow |
 | 6. Package and publish | README, privacy disclosure, version support, release CI, npm tarball and Pi gallery metadata | Clean-profile install from packed artifact and Git tag works; legal/name checks complete; publish only with approval |
 
-If automatic Astra → Sol recovery after a provider outage is required in the first release, put a **separate request-level fallback milestone between 1 and 4**. Prove it before extending the public promise. Otherwise launch with ordered preflight fallback and explicit recovery, and document the limitation clearly.
+The research originally left automatic Astra → Sol outage recovery as an optional additional request-level milestone. **The approved v1 decision excludes it:** launch with ordered preflight fallback and explicit recovery, with no automatic generation replay. Any future request-level failover needs separate proof before extending that promise.
 
-Suggested new-repo structure, all paths relative to that future repository:
+Historical suggested new-repo structure, not a map of the implemented repository:
 
 ```text
 src/
@@ -520,13 +528,16 @@ Release checklist:
 - Test `pi install` from both npm/packed artifact and a Git ref. Document disabling the existing router before enabling this one.
 - Do not publish, reserve a name, or create a remote repository as a side effect of research.
 
-## 10. Decisions to settle before the detailed implementation plan
+## 10. Resolved implementation decisions
 
-1. **Fallback scope:** launch with preflight fallback and explicit generation-error recovery, or require transparent request-level outage failover from day one?
-2. **Routing boundary:** begin with new idle user requests and sticky tool loops, or require queued follow-ups/steering to be independently rerouted? The latter needs stronger lifecycle guarantees.
-3. **Disclosure default:** approve a minimal recent-text projection with explicit opt-in, or use current-message-only despite weaker continuation classification?
+The approved [v1 plan](../plans/v1.md) resolves the research-stage questions:
 
-Recommended scope: direct TypeSafe BYO key; fixed work taxonomy with configurable model lists; global-only config; minimal recent text; opt-in auto/shadow modes; manual selection wins; preflight fallback; no automatic replay after generation failures. Confirm this scope before turning the sequence into a commit-ready implementation plan.
+1. **Fallback scope:** ordered generation-model preflight fallbacks and explicit generation-error recovery. No automatic generation replay and no automatic classification-backend failover. Recovery selects a later eligible candidate without submitting any message.
+2. **Routing boundary:** new idle interactive inputs, sticky through tool loops; skip steering, queued follow-ups, and extension-injected work. Headless routing requires explicit opt-in and retains the documented preflight abort limitations.
+3. **Disclosure default:** bounded current-request and recent user/assistant text with explicit opt-in. No system prompts, raw tool results, reasoning blocks, or image bytes for classification.
+4. **Backend scope:** direct TypeSafe, Cloudflare Workers AI, and Vercel AI Gateway in v1, with explicit backend selection and environment or explicitly configured Pi credential reuse. This supersedes the original direct-only/future-gateway recommendation, not the outstanding backend contract and privacy caveats.
+
+The fixed work taxonomy, configurable provider-qualified model lists, global-only config, auto/shadow opt-in, and manual-selection priority remain. Source inspection confirms these implementation choices; it does not establish live compatibility, measured routing quality, or completion of the historical release gates.
 
 
 
