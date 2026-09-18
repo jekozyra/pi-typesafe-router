@@ -47,11 +47,11 @@ The official API is `POST https://api.typesafe.ai/v1/systemone`, authenticated w
 
 The primitives are:
 
-| Primitive | Result | Fit here |
-| --- | --- | --- |
-| Choice | Selected label, probability per label, confidence | Best starting point for a bounded route taxonomy |
-| Score | Distribution over ordered rubric levels and weighted score | Useful later; a numeric score does not magically measure task difficulty |
-| Noul | Probability of a yes/no statement | Optional independent signal, not a replacement for deterministic constraints |
+| Primitive | Result                                                     | Fit here                                                                     |
+| --------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Choice    | Selected label, probability per label, confidence          | Best starting point for a bounded route taxonomy                             |
+| Score     | Distribution over ordered rubric levels and weighted score | Useful later; a numeric score does not magically measure task difficulty     |
+| Noul      | Probability of a yes/no statement                          | Optional independent signal, not a replacement for deterministic constraints |
 
 Questions in a request are evaluated independently against the same state. They do not consume each other's answers. If we ask about several dimensions, code combines the results. A single well-scoped Choice is the least complex first implementation. [T1, T4]
 
@@ -114,16 +114,16 @@ The official package is `@typesafe-ai/sdk`; the JavaScript guide links version `
 
 The SDK is a reasonable transport choice, but defaults are inappropriate for the hot path without overrides:
 
-| SDK behavior | Design consequence |
-| --- | --- |
-| 10-second timeout **per attempt**, no total retry budget | Set a short total router deadline |
-| Two retries after the initial attempt | Set `maxRetries: 0` initially; classification is optional overhead |
-| Retries 408, 429, 5xx, connection errors and timeouts | Do not combine with another unbounded retry loop |
-| Retry-After accepted up to 60 seconds by default | Never let an auxiliary classifier hold a prompt that long |
-| Environment can override base URL, model, and log level | Explicitly supply reviewed values rather than inheriting surprising overrides |
-| Debug logging includes request/response bodies | Disable SDK body logging; own diagnostics must be metadata-only |
-| Response parsing casts parsed content to the requested type | Add runtime answer validation; TypeScript inference is not validation |
-| Caller abort signal is supported | Combine lifecycle cancellation with a deadline and discard stale completions |
+| SDK behavior                                                | Design consequence                                                            |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 10-second timeout **per attempt**, no total retry budget    | Set a short total router deadline                                             |
+| Two retries after the initial attempt                       | Set `maxRetries: 0` initially; classification is optional overhead            |
+| Retries 408, 429, 5xx, connection errors and timeouts       | Do not combine with another unbounded retry loop                              |
+| Retry-After accepted up to 60 seconds by default            | Never let an auxiliary classifier hold a prompt that long                     |
+| Environment can override base URL, model, and log level     | Explicitly supply reviewed values rather than inheriting surprising overrides |
+| Debug logging includes request/response bodies              | Disable SDK body logging; own diagnostics must be metadata-only               |
+| Response parsing casts parsed content to the requested type | Add runtime answer validation; TypeScript inference is not validation         |
+| Caller abort signal is supported                            | Combine lifecycle cancellation with a deadline and discard stale completions  |
 
 These statements come from the SDK configuration, retry reference, and source, not from an assumption about SDK conventions. [T7–T9]
 
@@ -147,11 +147,11 @@ The multi-model evidence review independently reinforced the main limits: neithe
 
 The additional official documentation confirms actual evaluation integrations, not merely listings in a chat-model catalogue:
 
-| Backend | Model identifier and invocation | Important adapter differences |
-| --- | --- | --- |
-| Direct TypeSafe (v1) | `jev-1.13.0`; `POST /v1/systemone` | `TYPESAFE_API_KEY`; Choice confidence in each answer; snake-case usage |
-| Cloudflare Workers AI (v1) | `typesafe/jev`; `env.AI.run(...)` or documented account-scoped REST `/ai/run` with `{model,input}` | REST uses Cloudflare account ID and API token; examples preserve TypeSafe-style answers/confidence/usage; handle actual REST response envelope explicitly |
-| Vercel AI Gateway (v1) | `typesafe-ai/jev`; AI SDK `experimental_evaluate` / `gateway.evaluationModel(...)` | Evaluation is SDK-only, not OpenAI/Anthropic/Cohere-compatible endpoints; standardized answers and camel-case usage; separate Jev confidence is in `providerMetadata.typesafe.confidence` |
+| Backend                    | Model identifier and invocation                                                                    | Important adapter differences                                                                                                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direct TypeSafe (v1)       | `jev-1.13.0`; `POST /v1/systemone`                                                                 | `TYPESAFE_API_KEY`; Choice confidence in each answer; snake-case usage                                                                                                                    |
+| Cloudflare Workers AI (v1) | `typesafe/jev`; `env.AI.run(...)` or documented account-scoped REST `/ai/run` with `{model,input}` | REST uses Cloudflare account ID and API token; examples preserve TypeSafe-style answers/confidence/usage; handle actual REST response envelope explicitly                                 |
+| Vercel AI Gateway (v1)     | `typesafe-ai/jev`; AI SDK `experimental_evaluate` / `gateway.evaluationModel(...)`                 | Evaluation is SDK-only, not OpenAI/Anthropic/Cohere-compatible endpoints; standardized answers and camel-case usage; separate Jev confidence is in `providerMetadata.typesafe.confidence` |
 
 Cloudflare's cited page is a **Workers AI model invocation**, not documentation that arbitrary Cloudflare AI Gateway chat proxies accept Jev evaluation. It lists a 32,000-token context and points to the dashboard for pricing. Its REST example uses Cloudflare credentials, not `TYPESAFE_API_KEY`; billing details and privacy guarantees still need their own review before shipping that backend. Including the adapter in approved v1 scope does not resolve those caveats. [G1]
 
@@ -296,13 +296,13 @@ Other constraints:
 
 ### 5.1 Three different fallbacks
 
-| Situation | Proposed behavior | What we must not claim |
-| --- | --- | --- |
-| Jev key missing, timeout, 401, 422, 429, 529, invalid answer | Skip classification; use the configured safe default chain, or leave routing disabled if not configured | That the cheapest model is a safe default |
-| Chosen target absent, unconfigured, incompatible, or unable to be selected | Try the next explicit candidate in that route | That registry availability proves provider health |
-| Generation provider fails after dispatch | Let Pi finish its own retry/recovery policy; report failure and offer an explicit next-model continuation | That re-sending the original user message is safe |
-| User cancels | Stop; invalidate pending decisions | That cancellation is permission to use a fallback |
-| All configured candidates fail eligibility | Stop automatic routing and clearly report why; do not silently choose an unrelated provider | That any model in the catalogue is authorized |
+| Situation                                                                  | Proposed behavior                                                                                         | What we must not claim                            |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Jev key missing, timeout, 401, 422, 429, 529, invalid answer               | Skip classification; use the configured safe default chain, or leave routing disabled if not configured   | That the cheapest model is a safe default         |
+| Chosen target absent, unconfigured, incompatible, or unable to be selected | Try the next explicit candidate in that route                                                             | That registry availability proves provider health |
+| Generation provider fails after dispatch                                   | Let Pi finish its own retry/recovery policy; report failure and offer an explicit next-model continuation | That re-sending the original user message is safe |
+| User cancels                                                               | Stop; invalidate pending decisions                                                                        | That cancellation is permission to use a fallback |
+| All configured candidates fail eligibility                                 | Stop automatic routing and clearly report why; do not silently choose an unrelated provider               | That any model in the catalogue is authorized     |
 
 If transparent outage failover is a launch requirement, it is an additional request-level feature with its own acceptance tests, not a small addition to the candidate loop. We must preserve completed tool results and never replay an entire agent run. An API request may be safe to repeat while the resulting agent action is not. Stripe's documented idempotency mechanism illustrates the missing guarantee: arbitrary Pi shell and file tools do not inherit server-side deduplication merely because a router retries. [S1]
 
@@ -321,12 +321,8 @@ Historical directional configuration, **not the implemented schema**. The approv
     "timeoutMs": 1500
   },
   "routes": {
-    "quick": [
-      { "provider": "YOUR_PROVIDER", "model": "YOUR_FAST_MODEL_ID" }
-    ],
-    "standard": [
-      { "provider": "YOUR_PROVIDER", "model": "YOUR_SOL_MODEL_ID" }
-    ],
+    "quick": [{ "provider": "YOUR_PROVIDER", "model": "YOUR_FAST_MODEL_ID" }],
+    "standard": [{ "provider": "YOUR_PROVIDER", "model": "YOUR_SOL_MODEL_ID" }],
     "deep": [
       { "provider": "YOUR_PROVIDER", "model": "YOUR_ASTRA_MODEL_ID" },
       { "provider": "YOUR_PROVIDER", "model": "YOUR_SOL_MODEL_ID" }
@@ -432,15 +428,15 @@ RouteLLM/RouterBench motivate outcome- and cost-based evaluation, not an obligat
 
 ### 7.3 Metrics
 
-| Layer | Metrics |
-| --- | --- |
-| Classification | Per-class confusion; macro-F1; uncertainty coverage; cheap-route precision; high-cost under-routing rate |
-| Probabilities | Brier score, reliability diagrams and calibration error on the rubric labels; confidence-versus-accuracy plots separately |
-| Selection | Valid target rate; skipped-candidate reasons; fallback frequency; model-switch frequency; unsupported input incidents |
-| Reliability | Classifier failure rate; deadline adherence; cancellation latency; duplicate/replayed tool actions; stale decisions applied |
-| Outcome | Task success; tests passed; blinded quality; manual correction; total tool calls and run length |
-| Economics | Actual classifier usage; generation input/output; cache read/write; retries; cost per successful task; subscription quota proxies reported separately |
-| UX | Routing overhead and full-task p50/p95/p99 latency; manual override rate; notification noise |
+| Layer          | Metrics                                                                                                                                               |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Classification | Per-class confusion; macro-F1; uncertainty coverage; cheap-route precision; high-cost under-routing rate                                              |
+| Probabilities  | Brier score, reliability diagrams and calibration error on the rubric labels; confidence-versus-accuracy plots separately                             |
+| Selection      | Valid target rate; skipped-candidate reasons; fallback frequency; model-switch frequency; unsupported input incidents                                 |
+| Reliability    | Classifier failure rate; deadline adherence; cancellation latency; duplicate/replayed tool actions; stale decisions applied                           |
+| Outcome        | Task success; tests passed; blinded quality; manual correction; total tool calls and run length                                                       |
+| Economics      | Actual classifier usage; generation input/output; cache read/write; retries; cost per successful task; subscription quota proxies reported separately |
+| UX             | Routing overhead and full-task p50/p95/p99 latency; manual override rate; notification noise                                                          |
 
 The full probability distribution can be evaluated against rubric labels. Do not apply a calibration metric to the confidence scalar as though the docs promised it was the winning class probability. Good rubric calibration still does not prove target success calibration.
 
@@ -467,14 +463,14 @@ Compare paired task outcomes and bootstrap confidence intervals at the **task/co
 
 This was the research-stage sequence, not a current implementation checklist. The approved [v1 plan](../plans/v1.md) supersedes its direct-only adapter scope and pending-approval language. The integration findings and release caveats remain relevant; the table is not evidence that its exit conditions have passed.
 
-| Milestone | Deliverable | Exit condition |
-| --- | --- | --- |
-| 1. Establish the narrow contract | New `pi-typesafe-router` Git repo; TypeScript; license; package manifest; config schema; lifecycle characterization harness | We prove model selection, cancellation and retry ownership on Pi 0.85.1 before committing to the hook architecture |
-| 2. Build the deterministic core | Config parsing, registry checks, candidate eligibility, ordered fallback and default policy | Table-driven tests cover invalid IDs, absent auth, duplicate candidates, exhausted chains and incompatible images/context |
-| 3. Add Jev | Official SDK adapter or bounded fetch adapter; one Choice; state projection; strict answer validation | Mocked HTTP tests cover success, invalid bodies, 401/422/429/529, timeout, cancellation and metadata-only logs |
-| 4. Integrate control and diagnostics | Routing at supported boundaries; manual override; shadow mode; setup/validate/status/check; lifecycle cleanup | Integration tests prove no tool-loop rerouting, no stale decisions, no hidden configuration mutation and clean non-TUI output |
-| 5. Evaluate and harden | Private pilot corpus and sandbox task runs; tune rubric, deadline and uncertainty policy | Evidence supports an explicit quality/spend/latency trade-off; otherwise remain opt-in/shadow |
-| 6. Package and publish | README, privacy disclosure, version support, release CI, npm tarball and Pi gallery metadata | Clean-profile install from packed artifact and Git tag works; legal/name checks complete; publish only with approval |
+| Milestone                            | Deliverable                                                                                                                 | Exit condition                                                                                                                |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1. Establish the narrow contract     | New `pi-typesafe-router` Git repo; TypeScript; license; package manifest; config schema; lifecycle characterization harness | We prove model selection, cancellation and retry ownership on Pi 0.85.1 before committing to the hook architecture            |
+| 2. Build the deterministic core      | Config parsing, registry checks, candidate eligibility, ordered fallback and default policy                                 | Table-driven tests cover invalid IDs, absent auth, duplicate candidates, exhausted chains and incompatible images/context     |
+| 3. Add Jev                           | Official SDK adapter or bounded fetch adapter; one Choice; state projection; strict answer validation                       | Mocked HTTP tests cover success, invalid bodies, 401/422/429/529, timeout, cancellation and metadata-only logs                |
+| 4. Integrate control and diagnostics | Routing at supported boundaries; manual override; shadow mode; setup/validate/status/check; lifecycle cleanup               | Integration tests prove no tool-loop rerouting, no stale decisions, no hidden configuration mutation and clean non-TUI output |
+| 5. Evaluate and harden               | Private pilot corpus and sandbox task runs; tune rubric, deadline and uncertainty policy                                    | Evidence supports an explicit quality/spend/latency trade-off; otherwise remain opt-in/shadow                                 |
+| 6. Package and publish               | README, privacy disclosure, version support, release CI, npm tarball and Pi gallery metadata                                | Clean-profile install from packed artifact and Git tag works; legal/name checks complete; publish only with approval          |
 
 The research originally left automatic Astra → Sol outage recovery as an optional additional request-level milestone. **The approved v1 decision excludes it:** launch with ordered preflight fallback and explicit recovery, with no automatic generation replay. Any future request-level failover needs separate proof before extending that promise.
 
@@ -538,8 +534,6 @@ The approved [v1 plan](../plans/v1.md) resolves the research-stage questions:
 4. **Backend scope:** direct TypeSafe, Cloudflare Workers AI, and Vercel AI Gateway in v1, with explicit backend selection and environment or explicitly configured Pi credential reuse. This supersedes the original direct-only/future-gateway recommendation, not the outstanding backend contract and privacy caveats.
 
 The fixed work taxonomy, configurable provider-qualified model lists, global-only config, auto/shadow opt-in, and manual-selection priority remain. Source inspection confirms these implementation choices; it does not establish live compatibility, measured routing quality, or completion of the historical release gates.
-
-
 
 ## Sources
 

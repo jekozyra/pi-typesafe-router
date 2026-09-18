@@ -3,11 +3,13 @@ import type { ClassificationState } from "./types.ts";
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.flatMap((block: unknown) => {
-    if (!block || typeof block !== "object") return [];
-    const value = block as Record<string, unknown>;
-    return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
-  }).join("\n");
+  return content
+    .flatMap((block: unknown) => {
+      if (!block || typeof block !== "object") return [];
+      const value = block as Record<string, unknown>;
+      return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
+    })
+    .join("\n");
 }
 
 /** Project only conversational text; never inspect files, tools, or image bytes. */
@@ -17,8 +19,15 @@ export function projectState(
   maxChars: number,
   historyMessages: number,
 ): ClassificationState | undefined {
-  if (!Number.isInteger(maxChars) || maxChars < 1 || !Number.isInteger(historyMessages) || historyMessages < 0
-    || !current.trim() || current.length > maxChars) return undefined;
+  if (
+    !Number.isInteger(maxChars) ||
+    maxChars < 1 ||
+    !Number.isInteger(historyMessages) ||
+    historyMessages < 0 ||
+    !current.trim() ||
+    current.length > maxChars
+  )
+    return undefined;
   const recent: ClassificationState["recent_conversation"] = [];
   let remaining = maxChars - current.length;
   for (let i = history.length - 1; i >= 0 && recent.length < historyMessages; i--) {
@@ -41,7 +50,11 @@ export function projectState(
  * preflight heuristic, not an exact provider tokenizer or image-size guarantee.
  * Cyclic/non-serializable input fails closed rather than underestimating it.
  */
-export function estimateInputTokens(systemPrompt: string, messages: readonly unknown[], tools: readonly unknown[]): number {
+export function estimateInputTokens(
+  systemPrompt: string,
+  messages: readonly unknown[],
+  tools: readonly unknown[],
+): number {
   const ancestors = new Set<object>();
   function estimate(value: unknown): number {
     if (value === undefined) return 4;
@@ -52,9 +65,11 @@ export function estimateInputTokens(systemPrompt: string, messages: readonly unk
     if (typeof value !== "object" || ancestors.has(value)) return Infinity;
     ancestors.add(value);
     try {
-      if (Array.isArray(value)) return 2 + value.reduce((sum: number, item: unknown) => sum + estimate(item) + 1, 0);
+      if (Array.isArray(value))
+        return 2 + value.reduce((sum: number, item: unknown) => sum + estimate(item) + 1, 0);
       const record = value as Record<string, unknown>;
-      const image = record.type === "image" || record.type === "image_url" || record.type === "input_image";
+      const image =
+        record.type === "image" || record.type === "image_url" || record.type === "input_image";
       let total = image ? 16_384 : 2;
       for (const [key, item] of Object.entries(record)) {
         // Image payloads may be strings or nested URLs/sources; none are expanded.
@@ -66,5 +81,11 @@ export function estimateInputTokens(systemPrompt: string, messages: readonly unk
       ancestors.delete(value);
     }
   }
-  return 256 + estimate(systemPrompt) + estimate(messages) + estimate(tools) + 32 * (messages.length + tools.length);
+  return (
+    256 +
+    estimate(systemPrompt) +
+    estimate(messages) +
+    estimate(tools) +
+    32 * (messages.length + tools.length)
+  );
 }

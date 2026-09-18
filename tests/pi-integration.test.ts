@@ -57,16 +57,19 @@ async function fixture(t: TestContext, failGeneration = false) {
   await mkdir(cwd);
   await mkdir(agentDir);
   const chain = [selectedId, initialId].map((model) => ({ provider, model }));
-  await writeFile(join(agentDir, "typesafe-router.json"), JSON.stringify({
-    version: 1,
-    mode: "auto",
-    allowHeadless: true,
-    backend: { type: "typesafe", auth: { source: "env", variable: "TEST_TYPESAFE_KEY" } },
-    routes: { quick: chain, standard: chain, deep: chain },
-    defaultRoute: "standard",
-    uncertainRoute: "deep",
-    outputReserveTokens: 256,
-  }));
+  await writeFile(
+    join(agentDir, "typesafe-router.json"),
+    JSON.stringify({
+      version: 1,
+      mode: "auto",
+      allowHeadless: true,
+      backend: { type: "typesafe", auth: { source: "env", variable: "TEST_TYPESAFE_KEY" } },
+      routes: { quick: chain, standard: chain, deep: chain },
+      defaultRoute: "standard",
+      uncertainRoute: "deep",
+      outputReserveTokens: 256,
+    }),
+  );
 
   const modelRuntime = await ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),
@@ -99,7 +102,11 @@ async function fixture(t: TestContext, failGeneration = false) {
         model: model.id,
         content: [],
         usage: {
-          input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         timestamp: Date.now(),
@@ -114,8 +121,18 @@ async function fixture(t: TestContext, failGeneration = false) {
         message.content.push({ type: "text", text: "" });
         stream.push({ type: "text_start", contentIndex: 0, partial: message });
         message.content[0] = { type: "text", text: "synthetic reply" };
-        stream.push({ type: "text_delta", contentIndex: 0, delta: "synthetic reply", partial: message });
-        stream.push({ type: "text_end", contentIndex: 0, content: "synthetic reply", partial: message });
+        stream.push({
+          type: "text_delta",
+          contentIndex: 0,
+          delta: "synthetic reply",
+          partial: message,
+        });
+        stream.push({
+          type: "text_end",
+          contentIndex: 0,
+          content: "synthetic reply",
+          partial: message,
+        });
         message.stopReason = "stop";
         stream.push({ type: "done", reason: "stop", message });
       }
@@ -169,9 +186,13 @@ async function fixture(t: TestContext, failGeneration = false) {
   await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
   assert.deepEqual(errors, []);
   const sendUserMessage = t.mock.method(session, "sendUserMessage");
-  const records = () => sessionManager.getEntries().filter(
-    (entry): entry is CustomEntry => entry.type === "custom" && entry.customType.startsWith("typesafe-router"),
-  );
+  const records = () =>
+    sessionManager
+      .getEntries()
+      .filter(
+        (entry): entry is CustomEntry =>
+          entry.type === "custom" && entry.customType.startsWith("typesafe-router"),
+      );
   return { session, sessionManager, generations, records, errors, events, http, sendUserMessage };
 }
 
@@ -188,11 +209,18 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
     const appended = f.records().slice(before);
     assert.ok(appended.length > 0, "routing must append a custom decision entry");
     const recordData = JSON.stringify(appended.map((entry) => entry.data));
-    assert.ok(recordData.includes("standard"), "missing classifier credentials must use defaultRoute, not uncertainRoute");
+    assert.ok(
+      recordData.includes("standard"),
+      "missing classifier credentials must use defaultRoute, not uncertainRoute",
+    );
     assert.ok(recordData.includes(selectedId), "decision entry must identify the selected model");
     assert.equal(f.session.messages.filter((message) => message.role === "user").length, 1);
     assert.equal(f.sendUserMessage.mock.callCount(), 0);
-    assert.equal(f.http.mock.callCount(), 0, "missing classifier key must short-circuit before HTTP");
+    assert.equal(
+      f.http.mock.callCount(),
+      0,
+      "missing classifier key must short-circuit before HTTP",
+    );
     assert.deepEqual(f.errors, []);
   });
 
@@ -221,7 +249,11 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
     await f.session.agent.waitForIdle();
     assert.deepEqual(f.generations, [{ provider, model: selectedId }]);
     assert.equal(f.session.model?.id, selectedId);
-    assert.equal(f.sendUserMessage.mock.callCount(), 0, "router must never replay a failed generation");
+    assert.equal(
+      f.sendUserMessage.mock.callCount(),
+      0,
+      "router must never replay a failed generation",
+    );
     assert.equal(f.session.messages.filter((message) => message.role === "user").length, 1);
     const assistants = f.session.messages.filter((message) => message.role === "assistant");
     assert.equal(assistants.length, 1);

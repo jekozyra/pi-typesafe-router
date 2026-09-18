@@ -9,20 +9,34 @@ import type { Classification, Classify, ModelInfo, RouterConfig } from "../src/t
 const SECRET = "synthetic-auth-marker-not-a-real-key";
 const PROMPT = "Private prompt marker: explain the event loop and its scheduling.";
 const target = (model: string) => ({ provider: "fixture", model });
-const model = (id: string): ModelInfo => ({ provider: "fixture", id, input: ["text", "image"], contextWindow: 128_000, maxTokens: 16_384 });
+const model = (id: string): ModelInfo => ({
+  provider: "fixture",
+  id,
+  input: ["text", "image"],
+  contextWindow: 128_000,
+  maxTokens: 16_384,
+});
 const classification = (overrides: Partial<Classification> = {}): Classification => ({
-  choice: "quick", confidence: 0.99,
+  choice: "quick",
+  confidence: 0.99,
   probabilities: { quick: 0.99, standard: 0.005, deep: 0.005, uncertain: 0 },
-  requestedModel: "jev-1.13.0", ...overrides,
+  requestedModel: "jev-1.13.0",
+  ...overrides,
 });
-const config = (overrides: Partial<RouterConfig> = {}) => parseConfig({
-  mode: "auto", backend: { type: "typesafe", auth: { source: "pi", provider: "fixture" } },
-  routes: { quick: [target("quick")], standard: [target("standard")], deep: [target("deep")] },
-  defaultRoute: "standard", uncertainRoute: "deep", ...overrides,
-});
+const config = (overrides: Partial<RouterConfig> = {}) =>
+  parseConfig({
+    mode: "auto",
+    backend: { type: "typesafe", auth: { source: "pi", provider: "fixture" } },
+    routes: { quick: [target("quick")], standard: [target("standard")], deep: [target("deep")] },
+    defaultRoute: "standard",
+    uncertainRoute: "deep",
+    ...overrides,
+  });
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -51,25 +65,48 @@ async function harness(options: Options = {}) {
   const notifications: string[] = [];
   const sent: unknown[] = [];
   const statuses: unknown[] = [];
-  const models = options.models ?? [model("quick"), model("standard"), model("deep"), model("next")];
+  const models = options.models ?? [
+    model("quick"),
+    model("standard"),
+    model("deep"),
+    model("next"),
+  ];
   let initialized = false;
   const ctx = {
-    mode: options.mode ?? "tui", hasUI: true, scopedModels: [], model: models[0],
+    mode: options.mode ?? "tui",
+    hasUI: true,
+    scopedModels: [],
+    model: models[0],
     // Pi starts the extension before a run; busy-input scenarios begin afterward.
     isIdle: () => !initialized || (options.idle ?? true),
     getSystemPrompt: () => "Synthetic system prompt",
-    sessionManager: { getEntries: () => [], getLeafId: () => null, buildContextEntries: () => [], getBranch: () => [] },
+    sessionManager: {
+      getEntries: () => [],
+      getLeafId: () => null,
+      buildContextEntries: () => [],
+      getBranch: () => [],
+    },
     modelRegistry: {
       getAll: () => models,
       getAvailable: () => options.available ?? models,
-      find: (provider: string, id: string) => models.find(item => item.provider === provider && item.id === id),
+      find: (provider: string, id: string) =>
+        models.find((item) => item.provider === provider && item.id === id),
       getProviderAuth: async () => ({ auth: { apiKey: SECRET } }),
     },
     ui: {
-      notify: (text: string) => { notifications.push(text); },
-      setStatus: (...args: unknown[]) => { statuses.push(args); },
+      notify: (text: string) => {
+        notifications.push(text);
+      },
+      setStatus: (...args: unknown[]) => {
+        statuses.push(args);
+      },
       confirm: options.confirm ?? (async () => true),
-      onTerminalInput: (handler: TerminalHook) => { terminal.add(handler); return () => { terminal.delete(handler); }; },
+      onTerminalInput: (handler: TerminalHook) => {
+        terminal.add(handler);
+        return () => {
+          terminal.delete(handler);
+        };
+      },
     },
   } as unknown as ExtensionContext;
   async function emit(name: string, event: unknown = {}) {
@@ -78,11 +115,23 @@ async function harness(options: Options = {}) {
     return result;
   }
   const pi = {
-    on: (name: string, hook: Hook) => { hooks.set(name, [...(hooks.get(name) ?? []), hook]); },
-    registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => { commands.set(name, command.handler); },
-    appendEntry: (type: string, data: unknown) => { entries.push({ type, data }); },
-    getAllTools: () => [], getActiveTools: () => [],
-    sendUserMessage: (...args: unknown[]) => { sent.push(args); },
+    on: (name: string, hook: Hook) => {
+      hooks.set(name, [...(hooks.get(name) ?? []), hook]);
+    },
+    registerCommand: (
+      name: string,
+      command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> },
+    ) => {
+      commands.set(name, command.handler);
+    },
+    appendEntry: (type: string, data: unknown) => {
+      entries.push({ type, data });
+    },
+    getAllTools: () => [],
+    getActiveTools: () => [],
+    sendUserMessage: (...args: unknown[]) => {
+      sent.push(args);
+    },
     setModel: async (selected: ModelInfo) => {
       selections.push(selected.id);
       const success = await (options.setModel?.(selected) ?? Promise.resolve(true));
@@ -102,11 +151,23 @@ async function harness(options: Options = {}) {
   await emit("session_start");
   initialized = true;
   return {
-    ctx, emit, selections, classifications, entries, notifications, sent, statuses, terminal,
-    input: (overrides: Partial<InputEvent> = {}) => emit("input", { text: PROMPT, source: "interactive", images: [], ...overrides }),
+    ctx,
+    emit,
+    selections,
+    classifications,
+    entries,
+    notifications,
+    sent,
+    statuses,
+    terminal,
+    input: (overrides: Partial<InputEvent> = {}) =>
+      emit("input", { text: PROMPT, source: "interactive", images: [], ...overrides }),
     command: (args: string) => commands.get("typesafe-router")!(args, ctx),
-    escape: () => [...terminal].map(handler => handler("\u001b")),
-    decisions: () => entries.filter(entry => entry.type === "typesafe-router-decision").map(entry => entry.data),
+    escape: () => [...terminal].map((handler) => handler("\u001b")),
+    decisions: () =>
+      entries
+        .filter((entry) => entry.type === "typesafe-router-decision")
+        .map((entry) => entry.data),
   };
 }
 
@@ -137,12 +198,13 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     ["steering", { streamingBehavior: "steer" }],
     ["follow-up", { streamingBehavior: "followUp" }],
     ["extension", { source: "extension" }],
-  ] as const) it(`skips ${name} inputs`, async () => {
-    const h = await harness();
-    assert.deepEqual(await h.input(event), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-  });
+  ] as const)
+    it(`skips ${name} inputs`, async () => {
+      const h = await harness();
+      assert.deepEqual(await h.input(event), { action: "continue" });
+      assert.equal(h.classifications.length, 0);
+      assert.deepEqual(h.selections, []);
+    });
 
   it("skips inputs while the agent is not idle", async () => {
     const h = await harness({ idle: false });
@@ -151,17 +213,24 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   });
 
   for (const [name, result] of [
-    ["uncertain", { choice: "uncertain" }], ["missing confidence", { confidence: undefined }],
-    ["low confidence", { confidence: 0.2 }], ["nonfinite confidence", { confidence: NaN }],
-  ] as const) it(`${name} chooses the conservative route, not the default`, async () => {
-    const h = await harness({ classify: async () => classification(result) });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["deep"]);
-    assert.equal(h.decisions()[0].route, "deep");
-  });
+    ["uncertain", { choice: "uncertain" }],
+    ["missing confidence", { confidence: undefined }],
+    ["low confidence", { confidence: 0.2 }],
+    ["nonfinite confidence", { confidence: NaN }],
+  ] as const)
+    it(`${name} chooses the conservative route, not the default`, async () => {
+      const h = await harness({ classify: async () => classification(result) });
+      assert.deepEqual(await h.input(), { action: "continue" });
+      assert.deepEqual(h.selections, ["deep"]);
+      assert.equal(h.decisions()[0].route, "deep");
+    });
 
   it("classifier errors use the default chain without persisting error text", async () => {
-    const h = await harness({ classify: async () => { throw new Error(`${SECRET} ${PROMPT}`); } });
+    const h = await harness({
+      classify: async () => {
+        throw new Error(`${SECRET} ${PROMPT}`);
+      },
+    });
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.deepEqual(h.selections, ["standard"]);
     assert.equal(h.decisions()[0].route, "standard");
@@ -171,7 +240,10 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
   it("classifier timeout aborts its signal and uses the default chain; late success is ignored", async () => {
     const pending = deferred<Classification>();
-    const h = await harness({ config: config({ timeoutMs: 100 }), classify: () => pending.promise });
+    const h = await harness({
+      config: config({ timeoutMs: 100 }),
+      classify: () => pending.promise,
+    });
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications[0][2].signal.aborted, true);
     assert.deepEqual(h.selections, ["standard"]);
@@ -183,9 +255,20 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
   it("missing, ineligible, auth-false and throwing candidates fall through in order before generation", async () => {
     const h = await harness({
-      config: config({ routes: { quick: ["missing", "tiny", "noauth", "throws", "next"].map(target), standard: [target("standard")], deep: [target("deep")] } }),
-      models: [{ ...model("tiny"), contextWindow: 1 }, model("noauth"), model("throws"), model("next")],
-      setModel: async selected => {
+      config: config({
+        routes: {
+          quick: ["missing", "tiny", "noauth", "throws", "next"].map(target),
+          standard: [target("standard")],
+          deep: [target("deep")],
+        },
+      }),
+      models: [
+        { ...model("tiny"), contextWindow: 1 },
+        model("noauth"),
+        model("throws"),
+        model("next"),
+      ],
+      setModel: async (selected) => {
         if (selected.id === "noauth") return false;
         if (selected.id === "throws") throw new Error("synthetic auth failure");
         return true;
@@ -216,7 +299,12 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   it("Escape consumes the key, aborts classification and handles the unsent prompt", async () => {
     const entered = deferred<void>();
     const pending = deferred<Classification>();
-    const h = await harness({ classify: () => { entered.resolve(); return pending.promise; } });
+    const h = await harness({
+      classify: () => {
+        entered.resolve();
+        return pending.promise;
+      },
+    });
     const input = h.input();
     await entered.promise;
     assert.deepEqual(h.escape(), [{ consume: true }]);
@@ -232,9 +320,17 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   it("cancelled noncancellable setter keeps the lock until settlement", async () => {
     const entered = deferred<void>();
     const pending = deferred<boolean>();
-    const h = await harness({ setModel: () => { entered.resolve(); return pending.promise; } });
+    const h = await harness({
+      setModel: () => {
+        entered.resolve();
+        return pending.promise;
+      },
+    });
     let settled = false;
-    const original = h.input().then(result => { settled = true; return result; });
+    const original = h.input().then((result) => {
+      settled = true;
+      return result;
+    });
     await entered.promise;
     await h.command("cancel");
     assert.deepEqual(await h.input({ text: "Second submission" }), { action: "handled" });
@@ -257,13 +353,26 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 2);
     assert.deepEqual(h.selections, ["quick", "quick"]);
-    assert.equal(h.entries.filter(entry => entry.type === "typesafe-router-mode").at(-1)?.data.mode, "off");
+    assert.equal(
+      h.entries.filter((entry) => entry.type === "typesafe-router-mode").at(-1)?.data.mode,
+      "off",
+    );
   });
 
   it("generation failure never replays; explicit recover selects next and turns routing off", async () => {
-    const h = await harness({ config: config({ routes: { quick: [target("quick"), target("next")], standard: [target("standard")], deep: [target("deep")] } }) });
+    const h = await harness({
+      config: config({
+        routes: {
+          quick: [target("quick"), target("next")],
+          standard: [target("standard")],
+          deep: [target("deep")],
+        },
+      }),
+    });
     await h.input();
-    await h.emit("message_end", { message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" } });
+    await h.emit("message_end", {
+      message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
+    });
     await h.emit("agent_settled");
     await h.emit("agent_settled");
     assert.deepEqual(h.selections, ["quick"]);
@@ -271,7 +380,10 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     await h.command("recover");
     assert.deepEqual(h.selections, ["quick", "next"]);
     assert.equal(h.decisions().at(-1).reason, "explicit-recovery");
-    assert.equal(h.entries.filter(entry => entry.type === "typesafe-router-mode").at(-1)?.data.mode, "off");
+    assert.equal(
+      h.entries.filter((entry) => entry.type === "typesafe-router-mode").at(-1)?.data.mode,
+      "off",
+    );
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 1);
     await h.command("recover");
@@ -280,7 +392,11 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   });
 
   it("invalid configuration blocks input until explicitly switched off", async () => {
-    const h = await harness({ load: async () => { throw new Error("invalid config"); } });
+    const h = await harness({
+      load: async () => {
+        throw new Error("invalid config");
+      },
+    });
     assert.deepEqual(await h.input(), { action: "handled" });
     await h.command("on");
     assert.deepEqual(await h.input(), { action: "handled" });
@@ -293,7 +409,12 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   it("session shutdown aborts classification and ignores late completion", async () => {
     const entered = deferred<void>();
     const pending = deferred<Classification>();
-    const h = await harness({ classify: () => { entered.resolve(); return pending.promise; } });
+    const h = await harness({
+      classify: () => {
+        entered.resolve();
+        return pending.promise;
+      },
+    });
     const input = h.input();
     await entered.promise;
     await h.emit("session_shutdown");
@@ -312,8 +433,14 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     const entered = deferred<void>();
     const setter = deferred<boolean>();
     const h = await harness({
-      confirm: () => { asked.resolve(); return dialog.promise; },
-      setModel: () => { entered.resolve(); return setter.promise; },
+      confirm: () => {
+        asked.resolve();
+        return dialog.promise;
+      },
+      setModel: () => {
+        entered.resolve();
+        return setter.promise;
+      },
     });
     const check = h.command("check");
     await asked.promise;
@@ -325,7 +452,9 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.deepEqual(await h.input({ text: "Concurrent submission" }), { action: "handled" });
     assert.equal(h.terminal.size, 1, "original operation retains its cancellation hook");
     let shutdownSettled = false;
-    const shutdown = h.emit("session_shutdown").then(() => { shutdownSettled = true; });
+    const shutdown = h.emit("session_shutdown").then(() => {
+      shutdownSettled = true;
+    });
     await nextTurn();
     assert.equal(shutdownSettled, false, "shutdown must await the original setter");
     setter.resolve(true);
@@ -340,11 +469,13 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
-    const h = await harness({ load: () => {
-      if (++reads === 1) return Promise.resolve(config());
-      entered.resolve();
-      return read.promise;
-    } });
+    const h = await harness({
+      load: () => {
+        if (++reads === 1) return Promise.resolve(config());
+        entered.resolve();
+        return read.promise;
+      },
+    });
     const reload = h.command("reload");
     await entered.promise;
     assert.deepEqual(await h.input(), { action: "handled" });
@@ -363,11 +494,13 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
-    const h = await harness({ load: () => {
-      if (++reads === 1) return Promise.resolve(config());
-      entered.resolve();
-      return read.promise;
-    } });
+    const h = await harness({
+      load: () => {
+        if (++reads === 1) return Promise.resolve(config());
+        entered.resolve();
+        return read.promise;
+      },
+    });
     const reload = h.command("reload");
     await entered.promise;
     await h.command("off");
@@ -386,11 +519,13 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     const read = deferred<RouterConfig>();
     const entered = deferred<void>();
     let reads = 0;
-    const h = await harness({ load: () => {
-      if (++reads === 1) return Promise.resolve(config());
-      entered.resolve();
-      return read.promise;
-    } });
+    const h = await harness({
+      load: () => {
+        if (++reads === 1) return Promise.resolve(config());
+        entered.resolve();
+        return read.promise;
+      },
+    });
     const reload = h.command("reload");
     await entered.promise;
     const published = [h.entries.length, h.statuses.length, h.notifications.length];
@@ -405,68 +540,110 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.terminal.size, 0);
   });
 
-  for (const alreadyOff of [false, true]) it(`manual selection invalidates recovery${alreadyOff ? " even when already off" : ""}`, async () => {
-    const h = await harness({ config: config({ routes: { quick: [target("quick"), target("next")], standard: [target("standard")], deep: [target("deep")] } }) });
-    await h.input();
-    // Seed a genuine failure too: external selection must clear existing recovery eligibility.
-    await h.emit("message_end", { message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" } });
-    if (alreadyOff) await h.command("off");
-    await h.emit("model_select", { model: model("deep"), source: "manual" });
-    await h.emit("message_end", { message: { role: "assistant", provider: "fixture", model: "deep", stopReason: "error" } });
-    await h.emit("agent_settled");
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.equal(h.decisions().length, 1);
-    assert.deepEqual(h.sent, []);
-    // A delayed failure from A must not resurrect its discarded chain either.
-    await h.emit("message_end", { message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" } });
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick"]);
-  });
+  for (const alreadyOff of [false, true])
+    it(`manual selection invalidates recovery${alreadyOff ? " even when already off" : ""}`, async () => {
+      const h = await harness({
+        config: config({
+          routes: {
+            quick: [target("quick"), target("next")],
+            standard: [target("standard")],
+            deep: [target("deep")],
+          },
+        }),
+      });
+      await h.input();
+      // Seed a genuine failure too: external selection must clear existing recovery eligibility.
+      await h.emit("message_end", {
+        message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
+      });
+      if (alreadyOff) await h.command("off");
+      await h.emit("model_select", { model: model("deep"), source: "manual" });
+      await h.emit("message_end", {
+        message: { role: "assistant", provider: "fixture", model: "deep", stopReason: "error" },
+      });
+      await h.emit("agent_settled");
+      await h.command("recover");
+      assert.deepEqual(h.selections, ["quick"]);
+      assert.equal(h.decisions().length, 1);
+      assert.deepEqual(h.sent, []);
+      // A delayed failure from A must not resurrect its discarded chain either.
+      await h.emit("message_end", {
+        message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
+      });
+      await h.command("recover");
+      assert.deepEqual(h.selections, ["quick"]);
+    });
 
   for (const failed of [
     { provider: "fixture", model: "deep" },
     { provider: "other-provider", model: "quick" },
     {},
-  ]) it(`unmatched failure cannot enable recovery: ${JSON.stringify(failed)}`, async () => {
-    const h = await harness({ config: config({ routes: { quick: [target("quick"), target("next")], standard: [target("standard")], deep: [target("deep")] } }) });
-    await h.input();
-    await h.emit("message_end", { message: { role: "assistant", ...failed, stopReason: "error" } });
-    const notices = h.notifications.length;
-    await h.emit("agent_settled");
-    assert.equal(h.notifications.length, notices, "unrelated failures must not advertise recovery");
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.equal(h.decisions().length, 1);
-    assert.deepEqual(h.sent, []);
-  });
+  ])
+    it(`unmatched failure cannot enable recovery: ${JSON.stringify(failed)}`, async () => {
+      const h = await harness({
+        config: config({
+          routes: {
+            quick: [target("quick"), target("next")],
+            standard: [target("standard")],
+            deep: [target("deep")],
+          },
+        }),
+      });
+      await h.input();
+      await h.emit("message_end", {
+        message: { role: "assistant", ...failed, stopReason: "error" },
+      });
+      const notices = h.notifications.length;
+      await h.emit("agent_settled");
+      assert.equal(
+        h.notifications.length,
+        notices,
+        "unrelated failures must not advertise recovery",
+      );
+      await h.command("recover");
+      assert.deepEqual(h.selections, ["quick"]);
+      assert.equal(h.decisions().length, 1);
+      assert.deepEqual(h.sent, []);
+    });
 
   for (const command of ["on", "shadow"]) {
-    for (const interruption of ["off", "shutdown"]) it(`delayed ${command} confirmation cannot enable after ${interruption}`, async () => {
-      const dialog = deferred<boolean>();
-      const asked = deferred<void>();
-      const h = await harness({ config: config({ mode: "off" }), confirm: () => { asked.resolve(); return dialog.promise; } });
-      const enabling = h.command(command);
-      await asked.promise;
-      if (interruption === "off") await h.command("off");
-      else await h.emit("session_shutdown");
-      const published = [h.entries.length, h.statuses.length, h.notifications.length];
-      dialog.resolve(true);
-      await enabling;
-      assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
-      assert.equal(h.classifications.length, 0);
-      if (interruption === "off") {
-        assert.deepEqual(await h.input(), { action: "continue" });
+    for (const interruption of ["off", "shutdown"])
+      it(`delayed ${command} confirmation cannot enable after ${interruption}`, async () => {
+        const dialog = deferred<boolean>();
+        const asked = deferred<void>();
+        const h = await harness({
+          config: config({ mode: "off" }),
+          confirm: () => {
+            asked.resolve();
+            return dialog.promise;
+          },
+        });
+        const enabling = h.command(command);
+        await asked.promise;
+        if (interruption === "off") await h.command("off");
+        else await h.emit("session_shutdown");
+        const published = [h.entries.length, h.statuses.length, h.notifications.length];
+        dialog.resolve(true);
+        await enabling;
+        assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
         assert.equal(h.classifications.length, 0);
-      }
-      assert.deepEqual(h.selections, []);
-    });
+        if (interruption === "off") {
+          assert.deepEqual(await h.input(), { action: "continue" });
+          assert.equal(h.classifications.length, 0);
+        }
+        assert.deepEqual(h.selections, []);
+      });
   }
 
   it("a delayed check confirmation after shutdown does not classify or publish", async () => {
     const dialog = deferred<boolean>();
     const asked = deferred<void>();
-    const h = await harness({ confirm: () => { asked.resolve(); return dialog.promise; } });
+    const h = await harness({
+      confirm: () => {
+        asked.resolve();
+        return dialog.promise;
+      },
+    });
     const check = h.command("check");
     await asked.promise;
     await h.emit("session_shutdown");
@@ -481,9 +658,17 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
   it("off preserves the input lock until a noncancellable setter actually settles", async () => {
     const entered = deferred<void>();
     const setter = deferred<boolean>();
-    const h = await harness({ setModel: () => { entered.resolve(); return setter.promise; } });
+    const h = await harness({
+      setModel: () => {
+        entered.resolve();
+        return setter.promise;
+      },
+    });
     let settled = false;
-    const input = h.input().then(result => { settled = true; return result; });
+    const input = h.input().then((result) => {
+      settled = true;
+      return result;
+    });
     await entered.promise;
     await h.command("off");
     assert.deepEqual(await h.input(), { action: "handled" });
@@ -498,21 +683,27 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.terminal.size, 0);
   });
 
-  for (const event of ["session_before_switch", "session_before_fork", "session_before_tree"]) it(`${event} vetoes navigation until the active setter settles`, async () => {
-    const entered = deferred<void>();
-    const setter = deferred<boolean>();
-    const h = await harness({ setModel: () => { entered.resolve(); return setter.promise; } });
-    const input = h.input();
-    await entered.promise;
-    assert.deepEqual(await h.emit(event), { cancel: true });
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.deepEqual(await h.emit(event), { cancel: true });
-    setter.resolve(true);
-    assert.deepEqual(await input, { action: "handled" });
-    assert.equal(await h.emit(event), undefined);
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
-  });
+  for (const event of ["session_before_switch", "session_before_fork", "session_before_tree"])
+    it(`${event} vetoes navigation until the active setter settles`, async () => {
+      const entered = deferred<void>();
+      const setter = deferred<boolean>();
+      const h = await harness({
+        setModel: () => {
+          entered.resolve();
+          return setter.promise;
+        },
+      });
+      const input = h.input();
+      await entered.promise;
+      assert.deepEqual(await h.emit(event), { cancel: true });
+      assert.deepEqual(await h.input(), { action: "handled" });
+      assert.deepEqual(await h.emit(event), { cancel: true });
+      setter.resolve(true);
+      assert.deepEqual(await input, { action: "handled" });
+      assert.equal(await h.emit(event), undefined);
+      assert.deepEqual(h.decisions(), []);
+      assert.equal(h.terminal.size, 0);
+    });
 
   it("successful decisions contain neither credentials nor the raw prompt", async () => {
     const h = await harness();

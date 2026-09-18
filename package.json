@@ -2,21 +2,72 @@
   "name": "pi-typesafe-router",
   "version": "0.1.0",
   "description": "Opt-in Jev task routing for Pi with TypeSafe, Cloudflare and Vercel backends and ordered preflight model fallbacks",
-  "type": "module",
+  "keywords": [
+    "jev",
+    "model-routing",
+    "pi-extension",
+    "pi-package",
+    "typesafe"
+  ],
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension", "jev", "typesafe", "model-routing"],
-  "engines": {"node": ">=22.19.0"},
-  "pi": {"extensions": ["./src/index.ts"]},
-  "files": ["src", "examples", "README.md", "LICENSE", "docs/privacy.md", "docs/configuration.md", "docs/architecture.md", "docs/releasing.md"],
+  "files": [
+    "src",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "docs/privacy.md",
+    "docs/configuration.md",
+    "docs/architecture.md",
+    "docs/releasing.md"
+  ],
+  "type": "module",
   "scripts": {
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "lint": "oxlint --deny-warnings src tests scripts",
+    "lint:fix": "oxlint --fix --deny-warnings src tests scripts",
+    "check": "npm run fmt:check && npm run lint && npm run typecheck && npm test",
     "smoke:package": "node scripts/package-smoke.mjs",
     "prepack": "npm run typecheck"
   },
-  "dependencies": {"ai": "7.0.105", "zod": "^4.4.3"},
-  "peerDependencies": {"@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-ai": "*", "@earendil-works/pi-tui": "*"},
-  "peerDependenciesMeta": {"@earendil-works/pi-coding-agent": {"optional": true}, "@earendil-works/pi-ai": {"optional": true}, "@earendil-works/pi-tui": {"optional": true}},
-  "devDependencies": {"@earendil-works/pi-coding-agent": "0.85.1", "@earendil-works/pi-ai": "0.85.1", "@earendil-works/pi-tui": "0.85.1", "@types/node": "^22.0.0", "tsx": "^4.20.0", "typescript": "^5.8.3"}
+  "dependencies": {
+    "ai": "7.0.105",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "@types/node": "^22.0.0",
+    "oxfmt": "0.68.0",
+    "oxlint": "1.83.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
 }

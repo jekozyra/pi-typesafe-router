@@ -45,11 +45,11 @@ After a failed routed generation, `/typesafe-router recover` explicitly selects 
 
 See the [configuration reference](docs/configuration.md) and examples for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), and [Vercel](examples/vercel.json). Only the global file is read; `PI_CODING_AGENT_DIR` relocates it. Project-local configuration is intentionally ignored.
 
-| Backend | Credential | Model |
-| --- | --- | --- |
-| TypeSafe | `TYPESAFE_API_KEY` | `jev-1.13.0` |
-| Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN`, account ID in config | `typesafe/jev` |
-| Vercel AI Gateway | `AI_GATEWAY_API_KEY` | `typesafe-ai/jev` |
+| Backend               | Credential                                   | Model             |
+| --------------------- | -------------------------------------------- | ----------------- |
+| TypeSafe              | `TYPESAFE_API_KEY`                           | `jev-1.13.0`      |
+| Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN`, account ID in config | `typesafe/jev`    |
+| Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                         | `typesafe-ai/jev` |
 
 Backends are explicit; there is no cross-backend failover. Vercel uses the experimental AI SDK evaluation protocol, not a chat-completions endpoint. Missing confidence uses the conservative route; confidence is **not** the probability that the generation model will solve your task.
 
@@ -63,7 +63,7 @@ Backends are explicit; there is no cross-backend failover. Vercel uses the exper
 
 ## Contributing
 
-Run `npm run check` before proposing changes. Tests must remain offline and must not read real credentials. Use `npm run smoke:package` to check the packed extension in an isolated Pi installation. Public benchmark or performance claims require clarification of TypeSafe's terms first.
+Run `npm run fmt` to format with Oxfmt, and `npm run lint:fix` to apply safe Oxlint fixes. Run `npm run check` before proposing changes; it checks formatting, lint, TypeScript, and tests, and also runs in CI. Tests must remain offline and must not read real credentials. Use `npm run smoke:package` to check the packed extension in an isolated Pi installation. Public benchmark or performance claims require clarification of TypeSafe's terms first.
 
 ## License
 
