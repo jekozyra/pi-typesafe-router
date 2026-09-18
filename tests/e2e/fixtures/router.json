@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mode": "off",
+  "allowHeadless": false,
+  "timeoutMs": 30000,
+  "generationProbeTimeoutMs": 60000,
+  "routes": {
+    "quick": [{ "provider": "openrouter", "model": "openai/gpt-5.6-luna" }],
+    "standard": [{ "provider": "openrouter", "model": "openai/gpt-5.6-luna" }],
+    "deep": [{ "provider": "openrouter", "model": "openai/gpt-5.6-luna" }]
+  }
+}

@@ -61,6 +61,29 @@ To use one:
 - `tests/`: synthetic transport, policy, lifecycle, and real Pi SDK tests. No paid API calls.
 - `docs/`: [0001 — pre-generation routing](docs/0001-route-before-generation.md) and [0002 — doctor verification](docs/0002-verify-routing-with-doctor.md), recording implemented decisions and their tradeoffs.
 
+## Testing
+
+Run `npm run check` for offline tests, lint, formatting, and typechecking.
+
+Live E2E tests cover TypeSafe, Cloudflare, and Vercel. Each authenticates to Jev through the production adapter, then runs the real Pi CLI's `doctor` and checks session verification. All tiers use OpenRouter's `openai/gpt-5.6-luna` from the same [stock configuration](tests/e2e/fixtures/router.json).
+
+Provide these environment variables through your shell or secret manager; never commit keys:
+
+| Service    | Required variables                                                       |
+| ---------- | ------------------------------------------------------------------------ |
+| Generation | `OPENROUTER_API_KEY`                                                     |
+| TypeSafe   | `TYPESAFE_API_KEY`                                                       |
+| Cloudflare | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
+| Vercel     | `AI_GATEWAY_API_KEY`                                                     |
+
+Then explicitly opt into paid calls:
+
+```sh
+TYPESAFE_ROUTER_LIVE_E2E=1 npm run test:e2e
+```
+
+Tests use temporary Pi profiles, do not read personal Pi credentials, and leave routing off. They cover API-key authentication, not interactive OAuth login. Live tests are excluded from `npm test`, `npm run check`, and automatic CI.
+
 ## License
 
 [MIT](LICENSE). Third-party models, services, and dependencies retain their own terms.

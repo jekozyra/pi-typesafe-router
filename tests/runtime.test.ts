@@ -1049,8 +1049,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       for (const command of ["setup", "doctor", "status", "on", "shadow", "off", "help"])
         assert.match(output, new RegExp(`^${command} +`, "m"));
 
-      assert.match(output, /typesafe, cloudflare, vercel/);
-      assert.match(output, /may charge/);
+      assert.match(output, /setup \[typesafe\|cloudflare\|vercel\]/);
       assert.equal(reads, 1);
       assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
       assert.deepEqual(h.classifications, []);

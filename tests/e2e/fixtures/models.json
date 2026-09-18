@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "openrouter": {
+      "api": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKey": "$OPENROUTER_API_KEY",
+      "models": [{ "id": "openai/gpt-5.6-luna" }]
+    }
+  }
+}

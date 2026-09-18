@@ -72,12 +72,25 @@ const gatewayResponseSchema = z.object({
     .catch(undefined),
 });
 
+// Run markers must not fall through to legacy answers when a run is incomplete or malformed.
+const cloudflareAnswerSchema = directResponseSchema.extend({
+  state: z.never().optional(),
+  result: z.never().optional(),
+});
+
+const cloudflareResultSchema = z.union([
+  z
+    .object({ state: z.literal("Completed"), result: directResponseSchema })
+    .transform((value) => value.result),
+  cloudflareAnswerSchema,
+]);
+
 // A malformed envelope must not fall through to the bare-result alternative.
 const cloudflareResponseSchema = z.union([
   z
-    .object({ success: z.literal(true), result: directResponseSchema })
+    .object({ success: z.literal(true), result: cloudflareResultSchema })
     .transform((value) => value.result),
-  directResponseSchema.extend({ success: z.never().optional(), result: z.never().optional() }),
+  cloudflareAnswerSchema.extend({ success: z.never().optional() }),
 ]);
 
 type Answer = z.output<typeof answerSchema>;

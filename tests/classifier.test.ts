@@ -243,6 +243,57 @@ test("Cloudflare explicitly accepts bare results and rejects failed/malformed en
   }
 });
 
+test("Cloudflare unwraps a Completed run and preserves validated Jev results", async () => {
+  const raw = {
+    success: true,
+    result: { state: "Completed", result: direct(), gatewayMetadata: { keySource: "fixture" } },
+    errors: [],
+    messages: [],
+  };
+
+  const result = await createClassifier(async () => json(raw))(backends[1], state, options());
+  assert.equal(result.choice, "standard");
+  assert.equal(result.confidence, 0.8);
+  assert.equal(result.returnedModel, "jev-1.13.0");
+  assert.deepEqual(result.usage, { inputTokens: 20, outputTokens: 4 });
+});
+
+test("Cloudflare rejects unsuccessful runs and malformed nested answers", async () => {
+  for (const raw of [
+    { success: false, result: { state: "Completed", result: direct() } },
+    { result: { state: "Completed", result: direct() } },
+    { success: true, result: { state: "Failed", result: direct() } },
+    { success: true, result: { state: "Running", result: direct() } },
+    { success: true, result: { state: "Completed" } },
+    { success: true, result: { state: "Completed", result: { answers: {} } } },
+    {
+      success: true,
+      result: {
+        state: "Completed",
+        result: { ...direct(), answers: { task_class: { ...answer(), confidence: 2 } } },
+      },
+    },
+  ])
+    await assert.rejects(
+      createClassifier(async () => json(raw))(backends[1], state, options()),
+      failure("invalid-response"),
+    );
+});
+
+test("Cloudflare run markers cannot bypass validation through a legacy answer", async () => {
+  for (const runState of ["queued", "running", "failed", "unknown", undefined]) {
+    const raw = {
+      success: true,
+      result: { ...direct(), state: runState, result: direct() },
+    };
+
+    await assert.rejects(
+      createClassifier(async () => json(raw))(backends[1], state, options()),
+      failure("invalid-response"),
+    );
+  }
+});
+
 test("direct requires confidence; SDK only uses per-question metadata, never answer confidence", async () => {
   const noConfidence = {
     ...direct(),
