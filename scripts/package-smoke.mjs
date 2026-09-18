@@ -21,9 +21,20 @@ try {
   const packed = Array.isArray(output) ? output[0] : output["pi-typesafe-router"];
   assert.ok(packed, "npm pack did not return package metadata");
   assert.ok(packed.files.some((file) => file.path === "src/index.ts"));
+
+  for (const adr of [
+    "docs/0001-route-before-generation.md",
+    "docs/0002-verify-routing-with-doctor.md",
+  ]) {
+    assert.ok(
+      packed.files.some((file) => file.path === adr),
+      `Missing ADR: ${adr}`,
+    );
+  }
+
   assert.ok(
     packed.files.every((file) =>
-      /^(src\/[^/]+\.ts|examples\/[^/]+\.json|docs\/(privacy|configuration|architecture|releasing)\.md|README\.md|LICENSE|package\.json)$/.test(
+      /^(src\/[^/]+\.ts|examples\/[^/]+\.json|docs\/\d{4}-[a-z-]+\.md|README\.md|LICENSE|package\.json)$/.test(
         file.path,
       ),
     ),

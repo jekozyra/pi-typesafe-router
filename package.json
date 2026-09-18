@@ -15,10 +15,8 @@
     "examples",
     "README.md",
     "LICENSE",
-    "docs/privacy.md",
-    "docs/configuration.md",
-    "docs/architecture.md",
-    "docs/releasing.md"
+    "docs/0001-route-before-generation.md",
+    "docs/0002-verify-routing-with-doctor.md"
   ],
   "type": "module",
   "scripts": {

@@ -50,13 +50,15 @@ After a failed generation, use Pi's `/model` to choose a model, inspect complete
 
 ## Configuration
 
-See the [configuration reference](docs/configuration.md) and examples for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), and [Vercel](examples/vercel.json). Only the global file is read; `PI_CODING_AGENT_DIR` relocates it. Project-local configuration is intentionally ignored.
+Start with the configuration examples for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), and [Vercel](examples/vercel.json). Only the global file is read; `PI_CODING_AGENT_DIR` relocates it. Project-local configuration is intentionally ignored.
 
 | Backend               | Credential                                                | Model             |
 | --------------------- | --------------------------------------------------------- | ----------------- |
 | TypeSafe              | `TYPESAFE_API_KEY`                                        | `jev-1.13.0`      |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN`, account and gateway IDs in config | `typesafe/jev`    |
 | Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                                      | `typesafe-ai/jev` |
+
+Auto and shadow send the current request and bounded recent user/assistant text to the selected backend. That text can contain private code or secrets; the router is not a redaction system. See [ADR 0001](docs/0001-route-before-generation.md) for disclosure boundaries and retention limitations.
 
 Backends are explicit; there is no cross-backend failover. Vercel uses the experimental AI SDK evaluation protocol, not a chat-completions endpoint. Missing confidence uses the conservative route; confidence is **not** the probability that the generation model will solve your task.
 
@@ -66,7 +68,7 @@ Backends are explicit; there is no cross-backend failover. Vercel uses the exper
 - `src/config.ts`, `context.ts`, `routing.ts`: schema, bounded text projection, and deterministic policy.
 - `src/index.ts`, `settings.ts`: Pi lifecycle, commands, cancellation, and global settings.
 - `tests/`: synthetic transport, policy, lifecycle, and real Pi SDK tests. No paid API calls.
-- `docs/`: [privacy](docs/privacy.md), [architecture and limits](docs/architecture.md), and [release checklist](docs/releasing.md).
+- `docs/`: [0001 — pre-generation routing](docs/0001-route-before-generation.md) and [0002 — doctor verification](docs/0002-verify-routing-with-doctor.md), recording implemented decisions and their tradeoffs.
 
 ## Contributing
 
