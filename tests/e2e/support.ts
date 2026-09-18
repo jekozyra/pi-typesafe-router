@@ -9,6 +9,7 @@ export const credentialVariables = {
   typesafe: "TYPESAFE_API_KEY",
   cloudflare: "CLOUDFLARE_API_TOKEN",
   vercel: "AI_GATEWAY_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
 } as const;
 
 /** Opt-in must precede any credential access or potentially billable work. */
@@ -18,9 +19,12 @@ export async function liveConfig(backend: BackendName, env: NodeJS.ProcessEnv) {
     "Live tests may incur charges. Set TYPESAFE_ROUTER_LIVE_E2E=1 to opt in.",
   );
 
-  const required = ["OPENROUTER_API_KEY", credentialVariables[backend]];
+  const required = new Set<string>([credentialVariables.openrouter, credentialVariables[backend]]);
 
-  if (backend === "cloudflare") required.push("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID");
+  if (backend === "cloudflare") {
+    required.add("CLOUDFLARE_ACCOUNT_ID");
+    required.add("CLOUDFLARE_GATEWAY_ID");
+  }
 
   for (const name of required)
     assert.ok(env[name]?.trim(), `Missing required environment: ${name}`);

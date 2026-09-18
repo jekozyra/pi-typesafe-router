@@ -31,7 +31,7 @@ We read only global configuration under Pi's agent directory. Repository-local c
 
 We send the intact current request and bounded recent user/assistant text, not system prompts, raw tool results, reasoning, images, or files. Oversized, empty, or unexpanded slash input takes the conservative route without classification. This limits disclosure and irrelevant context, but ordinary text can still contain secrets. Shadow mode also sends text and can incur charges.
 
-We support one explicitly selected backend: TypeSafe direct, Cloudflare AI Gateway's account-scoped universal REST API with an explicit gateway ID, or Vercel AI Gateway's experimental evaluation API. Small HTTP adapters serve TypeSafe and Cloudflare; Vercel uses pinned AI SDK `7.0.105` because evaluation is not a chat-completions protocol. All adapters share the rubric and normalized validation boundary.
+We support one explicitly selected backend: TypeSafe direct, Cloudflare AI Gateway's account-scoped universal REST API with an explicit gateway ID, Vercel AI Gateway's experimental evaluation API, or OpenRouter's alpha Decisions API. Small HTTP adapters serve TypeSafe, Cloudflare, and OpenRouter; Vercel uses pinned AI SDK `7.0.105` because evaluation is not a chat-completions protocol. All adapters share the rubric and normalized validation boundary.
 
 We do not retry classification, follow redirects, accept arbitrary classifier endpoints, or fail over between backends. Credentials and classification share a deadline. This bounds optional overhead and avoids silently changing recipients or billing. Pi-managed classifier credentials are opt-in API-key reuse, not proof of endpoint compatibility. Cloudflare requests disabled logging/cache and one attempt; Vercel requests zero data retention by default. Neither control establishes a universal retention guarantee.
 
@@ -49,7 +49,7 @@ Pi's asynchronous `setModel()` has no cancellation argument. We await the actual
 - A cancelled setter can still change the model. A credential plugin that never resolves can block selection and reload; restarting Pi is the recovery. TUI Escape/Ctrl+C and `off` cancel router preflight; headless callers must use `off` because normal agent abort is not active yet.
 - Context estimates are conservative, not exact candidate-specific tokenization. Later prompt expansion and other extensions can change the eventual request.
 - We defer learned cost optimization, arbitrary classifier rubrics, automatic thinking-level routing, and per-tool-step rerouting. These need outcome evidence, not merely confident task labels.
-- Synthetic tests establish local behavior, not live backend parity, savings, retention, or task quality. Vercel confidence metadata remains account-dependent evidence to verify; missing confidence stays conservative. Public performance claims require review of TypeSafe's terms.
+- Synthetic tests establish local behavior, not live backend parity, savings, retention, or task quality. Vercel confidence metadata remains account-dependent evidence to verify; missing confidence stays conservative. OpenRouter's Decisions API is alpha and may change. Public performance claims require review of TypeSafe's terms.
 
 ## Implementation and verification
 

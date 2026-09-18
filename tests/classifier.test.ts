@@ -16,6 +16,7 @@ const backends: Backend[] = [
     auth,
   },
   { type: "vercel", model: "typesafe-ai/jev", zeroDataRetention: true, auth },
+  { type: "openrouter", model: "typesafe/jev-1.13", auth },
 ];
 
 const state: ClassificationState = { current_request: "private prompt", recent_conversation: [] };
@@ -81,7 +82,10 @@ for (const backend of backends) {
         assert.equal(headers.get("cf-aig-collect-log"), null);
       }
 
-      if (backend.type === "typesafe") {
+      if (backend.type === "openrouter") {
+        assert.equal(String(url), "https://openrouter.ai/api/alpha/decisions");
+        assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
+      } else if (backend.type === "typesafe") {
         assert.equal(String(url), "https://api.typesafe.ai/v1/systemone");
         assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
       } else if (backend.type === "cloudflare") {
@@ -111,7 +115,7 @@ for (const backend of backends) {
           ? sdk()
           : backend.type === "cloudflare"
             ? { success: true, result: direct() }
-            : direct(),
+            : { ...direct(), model: backend.model },
       );
     });
 

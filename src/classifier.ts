@@ -240,36 +240,42 @@ export function createClassifier(
         );
       }
 
-      const url =
-        backend.type === "typesafe"
-          ? "https://api.typesafe.ai/v1/systemone"
-          : `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(backend.accountId)}/ai/run`;
-
-      const body =
-        backend.type === "typesafe"
-          ? { model: backend.model, state, questions }
-          : { model: backend.model, input: { state, questions } };
-
       const headers = new Headers({
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       });
 
-      if (backend.type === "cloudflare") {
-        headers.set("cf-aig-gateway-id", backend.gatewayId);
-        headers.set("cf-aig-collect-log", "false");
-        headers.set("cf-aig-skip-cache", "true");
-        headers.set("cf-aig-max-attempts", "1");
+      let url: string;
+      let body: string;
+      let schema: typeof directResponseSchema | typeof cloudflareResponseSchema;
+
+      switch (backend.type) {
+        case "typesafe":
+          url = "https://api.typesafe.ai/v1/systemone";
+          body = JSON.stringify({ model: backend.model, state, questions });
+          schema = directResponseSchema;
+          break;
+        case "openrouter":
+          url = "https://openrouter.ai/api/alpha/decisions";
+          body = JSON.stringify({ model: backend.model, state, questions });
+          schema = directResponseSchema;
+          break;
+        case "cloudflare":
+          url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(backend.accountId)}/ai/run`;
+          body = JSON.stringify({ model: backend.model, input: { state, questions } });
+          schema = cloudflareResponseSchema;
+          headers.set("cf-aig-gateway-id", backend.gatewayId);
+          headers.set("cf-aig-collect-log", "false");
+          headers.set("cf-aig-skip-cache", "true");
+          headers.set("cf-aig-max-attempts", "1");
+          break;
       }
 
       const response = await guardedFetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body,
       });
-
-      const schema =
-        backend.type === "cloudflare" ? cloudflareResponseSchema : directResponseSchema;
 
       const parsed = schema.parse(await response.json());
       signal.throwIfAborted();

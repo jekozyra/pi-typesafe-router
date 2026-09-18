@@ -2,7 +2,7 @@
 
 An opt-in [Pi](https://github.com/earendil-works/pi) extension that asks Jev to classify a task, then selects a generation model from your ordered mappings.
 
-Supported jev providers are **TypeSafe, Cloudflare AI Gateway, and Vercel AI Gateway**.
+Supported Jev providers are **TypeSafe, Cloudflare AI Gateway, Vercel AI Gateway, and OpenRouter**.
 
 ## Setup
 
@@ -39,19 +39,20 @@ Run `/typesafe-router help` for a table explaining every command.
 
 ## Configuration
 
-Configuration examples are provided for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), and [Vercel](examples/vercel.json).
+Configuration examples are provided for [TypeSafe](examples/typesafe.json), [Cloudflare](examples/cloudflare.json), [Vercel](examples/vercel.json), and [OpenRouter](examples/openrouter.json).
 
 To use one:
 
 ```text
-/typesafe-router setup [typesafe|cloudflare|vercel]
+/typesafe-router setup [typesafe|cloudflare|vercel|openrouter]
 ```
 
-| Backend               | Credential                                                | Model             |
-| --------------------- | --------------------------------------------------------- | ----------------- |
-| TypeSafe              | `TYPESAFE_API_KEY`                                        | `jev-1.13.0`      |
-| Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN`, account and gateway IDs in config | `typesafe/jev`    |
-| Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                                      | `typesafe-ai/jev` |
+| Backend               | Credential                                                | Model               |
+| --------------------- | --------------------------------------------------------- | ------------------- |
+| TypeSafe              | `TYPESAFE_API_KEY`                                        | `jev-1.13.0`        |
+| Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN`, account and gateway IDs in config | `typesafe/jev`      |
+| Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                                      | `typesafe-ai/jev`   |
+| OpenRouter            | `OPENROUTER_API_KEY`                                      | `typesafe/jev-1.13` |
 
 ## Project structure
 
@@ -72,7 +73,7 @@ E2E tests require the following variables to be set:
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_GATEWAY_ID`
-- `AI_GATEWAY_API_KEY`                                                     |
+- `AI_GATEWAY_API_KEY` |
 
 Then:
 

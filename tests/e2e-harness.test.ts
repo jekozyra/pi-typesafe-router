@@ -51,7 +51,7 @@ describe("live E2E harness safeguards (offline)", () => {
 
   it("uses the identical Luna routing policy for every backend", async () => {
     const configs = await Promise.all(
-      (["typesafe", "cloudflare", "vercel"] as const).map((backend) =>
+      (["typesafe", "cloudflare", "vercel", "openrouter"] as const).map((backend) =>
         liveConfig(backend, credentials),
       ),
     );
@@ -68,6 +68,11 @@ describe("live E2E harness safeguards (offline)", () => {
 
     assert.equal(configs[2].backend.type, "vercel");
     assert.ok(configs[2].backend.type === "vercel" && !configs[2].backend.zeroDataRetention);
+    assert.deepEqual(configs[3].backend, {
+      type: "openrouter",
+      model: "typesafe/jev-1.13",
+      auth: { source: "env", variable: "OPENROUTER_API_KEY" },
+    });
   });
 
   it("runs the real CLI but rejects missing auth without network calls", async (t) => {

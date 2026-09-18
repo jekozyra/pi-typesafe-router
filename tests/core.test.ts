@@ -59,6 +59,11 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
     auth: { source: "env", variable: "AI_GATEWAY_API_KEY" },
     zeroDataRetention: true,
   });
+  assert.deepEqual(parseConfig({ ...minimal(), backend: { type: "openrouter" } }).backend, {
+    type: "openrouter",
+    model: "typesafe/jev-1.13",
+    auth: { source: "env", variable: "OPENROUTER_API_KEY" },
+  });
   const auth = { source: "pi", provider: "custom-provider" };
   assert.deepEqual(
     parseConfig({ ...minimal(), backend: { type: "typesafe", model: "jev-latest", auth } }).backend
@@ -79,6 +84,7 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
     { type: "cloudflare", accountId: "a".repeat(31) },
     { type: "cloudflare", accountId: "a".repeat(32), model: "other" },
     { type: "vercel", model: "other" },
+    { type: "openrouter", model: "other" },
     { type: "unknown" },
   ])
     assert.throws(() => parseConfig({ ...minimal(), backend }));

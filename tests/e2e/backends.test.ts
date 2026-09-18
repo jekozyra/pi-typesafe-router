@@ -9,7 +9,7 @@ import { ClassifierError, TASK_CLASSES } from "../../src/types.ts";
 import { assertDoctorPassed, credentialVariables, liveConfig } from "./support.ts";
 
 describe("live backend authentication → doctor", { concurrency: false }, () => {
-  for (const backend of ["typesafe", "cloudflare", "vercel"] as const)
+  for (const backend of ["typesafe", "cloudflare", "vercel", "openrouter"] as const)
     it(
       `${backend}: authenticates to Jev and passes doctor with Luna in all tiers`,
       { timeout: 150_000 },
@@ -68,7 +68,7 @@ describe("live backend authentication → doctor", { concurrency: false }, () =>
           PI_OFFLINE: "1",
           PI_TELEMETRY: "0",
           NO_COLOR: "1",
-          OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+          [credentialVariables.openrouter]: process.env[credentialVariables.openrouter],
           [keyVariable]: apiKey,
         });
 
