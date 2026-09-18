@@ -1,7 +1,7 @@
 {
   "name": "pi-typesafe-router",
   "version": "0.1.0",
-  "description": "Opt-in Jev task routing for Pi with TypeSafe, Cloudflare and Vercel backends and ordered preflight model fallbacks",
+  "description": "Opt-in Jev task routing for Pi with TypeSafe, Cloudflare, Vercel, and OpenRouter backends and ordered preflight model fallbacks",
   "keywords": [
     "jev",
     "model-routing",

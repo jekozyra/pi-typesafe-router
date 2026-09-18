@@ -29,7 +29,9 @@ import {
 import { classifierLines, routeLines, runtimeLines, type EvaluationResult } from "./diagnostics.ts";
 import { abortable, createConfig, loadConfig } from "./settings.ts";
 import {
+  BACKEND_TYPES,
   ClassifierError,
+  isBackendType,
   targetKey,
   type Classification,
   type Classify,
@@ -47,14 +49,15 @@ const sessionModeSchema = z.object({ mode: z.enum(["off", "auto", "shadow"]) });
 const DISCLOSURE =
   "Classification sends your request and bounded recent user/assistant text to the configured backend. Text can contain private code or secrets. Shadow mode also sends data and may incur charges. No automatic generation replay or classifier-backend failover.";
 
-const HELP =
-  "/typesafe-router setup [typesafe|cloudflare|vercel] | doctor | status | on | shadow | off | help";
+const BACKEND_HELP = BACKEND_TYPES.join("|");
+
+const HELP = `/typesafe-router setup [${BACKEND_HELP}] | doctor | status | on | shadow | off | help`;
 
 const COMMAND_HELP = `Usage: /typesafe-router <command>
 
 Command                              Description
 ---------------                      ------------------------------------
-setup [typesafe|cloudflare|vercel]   Create a config interactively.
+setup [${BACKEND_HELP}] Create a config interactively.
 doctor                               Apply and validate config..
 status                               Show current settings and activity.
 on                                   Enable automatic routing.
@@ -697,7 +700,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
             "classifier check: skipped; no valid configuration",
             invalidConfig
               ? "next: fix the configuration JSON, fields, or file permissions, then run /typesafe-router doctor"
-              : "next: /typesafe-router setup typesafe (or cloudflare/vercel), then /typesafe-router doctor",
+              : `next: /typesafe-router setup typesafe (or ${BACKEND_TYPES.slice(1).join("/")}), then /typesafe-router doctor`,
           ].join("\n"),
           "error",
         );
@@ -1020,12 +1023,11 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         }
 
         const backend =
-          option ??
-          (await ctx.ui.select("Classification backend", ["typesafe", "cloudflare", "vercel"]));
+          option ?? (await ctx.ui.select("Classification backend", [...BACKEND_TYPES]));
 
         if (!backend || !permitted()) return;
 
-        if (!["typesafe", "cloudflare", "vercel"].includes(backend)) {
+        if (!isBackendType(backend)) {
           notify(ctx, HELP, "warning");
 
           return;

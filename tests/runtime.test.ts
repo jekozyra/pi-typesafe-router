@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, it } from "node:test";
 import {
@@ -18,6 +21,7 @@ import {
 } from "../src/index.ts";
 import type { probeGeneration } from "../src/generation-probe.ts";
 import { parseConfig } from "../src/config.ts";
+import { loadConfig } from "../src/settings.ts";
 import {
   ClassifierError,
   type Classification,
@@ -113,7 +117,8 @@ interface Options {
   unverified?: boolean;
   probeGeneration?: typeof probeGeneration;
   config?: RouterConfig;
-  load?: () => Promise<RouterConfig | undefined>;
+  configPath?: string;
+  load?: (path: string) => Promise<RouterConfig | undefined>;
   classify?: Classify;
   setModel?: RouterAPI["setModel"];
   models?: Model<Api>[];
@@ -121,6 +126,7 @@ interface Options {
   mode?: "tui" | "rpc";
   idle?: boolean;
   confirm?: RouterContext["ui"]["confirm"];
+  select?: RouterContext["ui"]["select"];
   getContextUsage?: RouterContext["getContextUsage"];
 }
 
@@ -194,7 +200,7 @@ async function harness(options: Options = {}) {
       complete: unusedHostMethod,
     },
     ui: {
-      select: unusedHostMethod,
+      select: options.select ?? unusedHostMethod,
       input: unusedHostMethod,
       notify: (text) => {
         notifications.push(text);
@@ -280,10 +286,12 @@ async function harness(options: Options = {}) {
   };
 
   registerRouter(pi, {
-    configPath: "/synthetic/no-filesystem/router.json",
-    load: async () => {
+    configPath: options.configPath ?? "/synthetic/no-filesystem/router.json",
+    load: async (requestedPath) => {
       if (warming) return firstConfig;
-      const loaded = await (options.load?.() ?? Promise.resolve(options.config ?? config()));
+
+      const loaded = await (options.load?.(requestedPath) ??
+        Promise.resolve(options.config ?? config()));
 
       if (!initialized) firstConfig = loaded;
 
@@ -1025,6 +1033,39 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       assert.deepEqual(h.sent, []);
     });
 
+  it("setup openrouter persists a valid off configuration with the selected model", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "typesafe-router-setup-"));
+
+    t.after(() => rm(root, { recursive: true, force: true }));
+
+    const configPath = join(root, "typesafe-router.json");
+
+    const h = await harness({
+      unverified: true,
+      configPath,
+      load: loadConfig,
+      select: async (_title, choices) =>
+        choices.includes("fixture/quick") ? "fixture/quick" : undefined,
+    });
+
+    await h.command("setup openrouter");
+    const saved = await loadConfig(configPath);
+
+    assert.ok(saved);
+    assert.equal(saved.mode, "off");
+    assert.deepEqual(saved.backend, {
+      type: "openrouter",
+      model: "typesafe/jev-1.13",
+      auth: { source: "env", variable: "OPENROUTER_API_KEY" },
+    });
+    assert.deepEqual(saved.routes, {
+      quick: [target("quick")],
+      standard: [target("quick")],
+      deep: [target("quick")],
+    });
+    assert.match(h.notifications.at(-1)!, /Created .*routing is off/);
+  });
+
   for (const invalid of [false, true])
     it(`help is read-only while busy with ${invalid ? "invalid" : "missing"} config`, async () => {
       let reads = 0;
@@ -1049,7 +1090,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       for (const command of ["setup", "doctor", "status", "on", "shadow", "off", "help"])
         assert.match(output, new RegExp(`^${command} +`, "m"));
 
-      assert.match(output, /setup \[typesafe\|cloudflare\|vercel\]/);
+      assert.match(output, /setup \[typesafe\|cloudflare\|vercel\|openrouter\]/);
       assert.equal(reads, 1);
       assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
       assert.deepEqual(h.classifications, []);

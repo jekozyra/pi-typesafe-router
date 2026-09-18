@@ -57,6 +57,13 @@ const backend = z.discriminatedUnion("type", [
       zeroDataRetention: z.boolean().default(true),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("openrouter"),
+      model: z.literal("typesafe/jev-1.13").default("typesafe/jev-1.13"),
+      auth: auth.default(envAuth("OPENROUTER_API_KEY")),
+    })
+    .strict(),
 ]);
 
 const target = z.object({ provider, model: identifier }).strict();

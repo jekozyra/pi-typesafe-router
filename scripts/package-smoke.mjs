@@ -22,6 +22,12 @@ try {
   assert.ok(packed, "npm pack did not return package metadata");
   assert.ok(packed.files.some((file) => file.path === "src/index.ts"));
 
+  for (const example of ["typesafe", "cloudflare", "vercel", "openrouter"])
+    assert.ok(
+      packed.files.some((file) => file.path === `examples/${example}.json`),
+      `Missing configuration example: ${example}`,
+    );
+
   for (const adr of [
     "docs/0001-route-before-generation.md",
     "docs/0002-verify-routing-with-doctor.md",

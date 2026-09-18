@@ -10,6 +10,14 @@ export type CredentialSource =
   | { source: "env"; variable: string }
   | { source: "pi"; provider: string };
 
+export const BACKEND_TYPES = ["typesafe", "cloudflare", "vercel", "openrouter"] as const;
+
+export type BackendType = (typeof BACKEND_TYPES)[number];
+
+export function isBackendType(value: string): value is BackendType {
+  return BACKEND_TYPES.some((backend) => backend === value);
+}
+
 export type Backend =
   | { type: "typesafe"; model: string; auth: CredentialSource }
   | {
@@ -24,7 +32,8 @@ export type Backend =
       model: "typesafe-ai/jev";
       auth: CredentialSource;
       zeroDataRetention: boolean;
-    };
+    }
+  | { type: "openrouter"; model: "typesafe/jev-1.13"; auth: CredentialSource };
 
 export interface Target {
   provider: string;
