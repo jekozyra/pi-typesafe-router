@@ -65,24 +65,20 @@ To use one:
 
 Run `npm run check` for offline tests, lint, formatting, and typechecking.
 
-Live E2E tests cover TypeSafe, Cloudflare, and Vercel. Each authenticates to Jev through the production adapter, then runs the real Pi CLI's `doctor` and checks session verification. All tiers use OpenRouter's `openai/gpt-5.6-luna` from the same [stock configuration](tests/e2e/fixtures/router.json).
+E2E tests require the following variables to be set:
 
-Provide these environment variables through your shell or secret manager; never commit keys:
+- `OPENROUTER_API_KEY`
+- `TYPESAFE_API_KEY
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_GATEWAY_ID`
+- `AI_GATEWAY_API_KEY`                                                     |
 
-| Service    | Required variables                                                       |
-| ---------- | ------------------------------------------------------------------------ |
-| Generation | `OPENROUTER_API_KEY`                                                     |
-| TypeSafe   | `TYPESAFE_API_KEY`                                                       |
-| Cloudflare | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` |
-| Vercel     | `AI_GATEWAY_API_KEY`                                                     |
-
-Then explicitly opt into paid calls:
+Then:
 
 ```sh
 TYPESAFE_ROUTER_LIVE_E2E=1 npm run test:e2e
 ```
-
-Tests use temporary Pi profiles, do not read personal Pi credentials, and leave routing off. They cover API-key authentication, not interactive OAuth login. Live tests are excluded from `npm test`, `npm run check`, and automatic CI.
 
 ## License
 
