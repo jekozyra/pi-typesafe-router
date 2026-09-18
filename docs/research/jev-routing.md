@@ -5,7 +5,7 @@ Status: Historical research complete; v1 scope approved and local implementation
 
 ## Implementation decision — 2026-09-17 (local date)
 
-The approved [v1 plan](../plans/v1.md) supersedes the original direct-only launch recommendation: v1 includes **direct TypeSafe, Cloudflare Workers AI, and Vercel AI Gateway**, with one explicitly selected classification backend and no automatic backend failover. Generation uses ordered preflight candidate fallbacks, **no automatic replay**, and explicit recovery that selects a later eligible model without sending a message. These decisions are reflected in [`config.ts`](../../src/config.ts), [`classifier.ts`](../../src/classifier.ts), and [`index.ts`](../../src/index.ts).
+The approved v1 scope supersedes the original direct-only launch recommendation: v1 includes **direct TypeSafe, Cloudflare Workers AI, and Vercel AI Gateway**, with one explicitly selected classification backend and no automatic backend failover. Generation uses ordered preflight candidate fallbacks, **no automatic replay**, and explicit recovery that selects a later eligible model without sending a message. These decisions are reflected in [`config.ts`](../../src/config.ts), [`classifier.ts`](../../src/classifier.ts), and [`index.ts`](../../src/index.ts).
 
 We retain the research evidence, sources, and unresolved caveats below. Implementation and synthetic tests do not establish live backend compatibility. In particular, Vercel's documented confidence metadata location does not prove the per-question shape assumed by the adapter; missing confidence remains conservative (§1.6).
 
@@ -461,7 +461,7 @@ Compare paired task outcomes and bootstrap confidence intervals at the **task/co
 
 ## 8. Historical proposed build sequence
 
-This was the research-stage sequence, not a current implementation checklist. The approved [v1 plan](../plans/v1.md) supersedes its direct-only adapter scope and pending-approval language. The integration findings and release caveats remain relevant; the table is not evidence that its exit conditions have passed.
+This was the research-stage sequence, not a current implementation checklist. The approved v1 scope supersedes its direct-only adapter scope and pending-approval language. The integration findings and release caveats remain relevant; the table is not evidence that its exit conditions have passed.
 
 | Milestone                            | Deliverable                                                                                                                 | Exit condition                                                                                                                |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -526,7 +526,7 @@ Release checklist:
 
 ## 10. Resolved implementation decisions
 
-The approved [v1 plan](../plans/v1.md) resolves the research-stage questions:
+The approved v1 scope resolves the research-stage questions:
 
 1. **Fallback scope:** ordered generation-model preflight fallbacks and explicit generation-error recovery. No automatic generation replay and no automatic classification-backend failover. Recovery selects a later eligible candidate without submitting any message.
 2. **Routing boundary:** new idle interactive inputs, sticky through tool loops; skip steering, queued follow-ups, and extension-injected work. Headless routing requires explicit opt-in and retains the documented preflight abort limitations.
