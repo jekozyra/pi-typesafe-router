@@ -585,7 +585,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   }
 
   function currentModel(ctx: RouterContext) {
-    return `generation model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none selected"}`;
+    return `current model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none selected"}`;
   }
 
   async function showStatus(ctx: RouterContext) {
@@ -639,9 +639,19 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     const { op, cleanup } = begin(ctx, "doctor");
     verified = undefined;
     op.phase = "loading";
+
+    function progress(message: string) {
+      if (!isCurrent(op)) return;
+
+      if (ctx.hasUI && ctx.mode === "tui")
+        ctx.ui.setWidget(`${NAME}-doctor-progress`, [message], { placement: "aboveEditor" });
+      else notify(ctx, message);
+    }
+
+    progress("Checking configuration…");
     notify(
       ctx,
-      "pi-typesafe-router: doctor running\nconfig: refreshing\nchecks: automatic synthetic classifier and generation requests; may incur charges; no conversation history or tools",
+      "Checks use synthetic requests and may incur charges; no conversation history or tools.",
     );
     let applied = false;
 
@@ -668,7 +678,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         notify(
           ctx,
           [
-            "pi-typesafe-router: doctor failed",
+            "pi-typesafe-router: ❌",
             ...runtimeLines(mode, "idle", path),
             `config: ${invalidConfig ? "invalid or unreadable; not applied" : "missing"}`,
             currentModel(ctx),
@@ -696,45 +706,60 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         (candidates) => !candidates.some((candidate) => candidate.eligible),
       );
 
-      op.phase = "classifying";
-      status(ctx);
-      const fingerprint = verificationFingerprint(loaded, ctx.modelRegistry);
-      const started = Date.now();
-
-      const result = await evaluate(
-        ctx,
-        loaded,
-        "Hello. Explain what a variable is in one sentence.",
-        op,
-        true,
-      );
-
-      if (!isCurrent(op)) return;
-
-      const classifierElapsed = Date.now() - started;
       op.phase = "probing";
-      status(ctx);
-      const probes: Awaited<ReturnType<typeof probeGeneration>>[] = [];
+      const fingerprint = verificationFingerprint(loaded, ctx.modelRegistry);
+      const targets = configuredTargets(loaded);
+      const total = targets.length + 1;
+      let completed = 0;
+      progress(`Checking model access… (0/${total} complete)`);
 
-      for (const target of configuredTargets(loaded)) {
-        if (!isCurrent(op)) return;
-        notify(
-          ctx,
-          `generation check: testing ${targetKey(target)} (synthetic text; no tools; timeout ${loaded.generationProbeTimeoutMs}ms)`,
-        );
-        probes.push(
-          await abortable(
-            () =>
-              probeGeneration(
-                ctx.modelRegistry,
-                target,
-                op.controller.signal,
-                loaded.generationProbeTimeoutMs,
-              ),
-            op.controller.signal,
-          ),
-        );
+      function completedProbe() {
+        completed++;
+        progress(`Checking model access… (${completed}/${total} complete)`);
       }
+
+      async function checkClassifier(cfg: RouterConfig) {
+        const started = Date.now();
+
+        const result = await evaluate(
+          ctx,
+          cfg,
+          "Hello. Explain what a variable is in one sentence.",
+          op,
+          true,
+        );
+
+        const milliseconds = Date.now() - started;
+        completedProbe();
+
+        return { result, milliseconds };
+      }
+
+      const generationTimeoutMs = loaded.generationProbeTimeoutMs;
+
+      const [classifier, probes] = await Promise.all([
+        checkClassifier(loaded),
+        Promise.all(
+          targets.map(async (target) => {
+            const probe = await abortable(
+              () =>
+                probeGeneration(
+                  ctx.modelRegistry,
+                  target,
+                  op.controller.signal,
+                  generationTimeoutMs,
+                ),
+              op.controller.signal,
+            );
+
+            completedProbe();
+
+            return probe;
+          }),
+        ),
+      ]);
+
+      const { result, milliseconds: classifierElapsed } = classifier;
 
       if (!isCurrent(op)) return;
 
@@ -766,19 +791,12 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       if (ready) verified = { fingerprint, passed, checkedAt: new Date().toISOString() };
 
       const lines = [
-        `pi-typesafe-router: doctor ${ready ? "complete" : "needs attention"}`,
-        ...runtimeLines(mode, "idle", path, loaded),
-        "config: applied from disk; session routing mode preserved",
+        `pi-typesafe-router: ${ready ? "✅" : "❌"}`,
+        ...runtimeLines(mode, "idle", path, loaded, []),
         currentModel(ctx),
-        `context usage: ${checks.inputTokens === null ? "unknown after compaction; size check deferred to Pi" : `${checks.inputTokens} tokens (Pi accounting)`}`,
-        ...routeLines(checkedRoutes),
+        `context usage: ${checks.inputTokens === null ? "unknown after compaction; size check deferred to Pi" : `${checks.inputTokens} tokens`}`,
         ...classifierLines(result, classifierElapsed, loaded),
-        ...probes.map(
-          (probe) =>
-            `generation check: ${targetKey(probe.target)}: ${probe.passed ? "passed" : `failed (${probe.reason})`} in ${probe.milliseconds}ms`,
-        ),
-        `routing verification: ${ready ? "ready; every route has a verified eligible candidate" : "blocked"}`,
-        "generation health: verified at this check only; future requests can still fail",
+        ...routeLines(checkedRoutes, probes),
       ];
 
       if (!unchanged)
@@ -794,34 +812,28 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           "next: fix the blocked route mappings or generation credentials, then run /typesafe-router doctor",
         );
       else if (result.classification && ctx.mode !== "tui" && !loaded.allowHeadless)
-        lines.push(
-          "next: allowHeadless is false; automatic routing is disabled in this interface. Enable it in config and run doctor if intended",
-        );
-      else if (result.classification && mode === "off")
-        lines.push(
-          "next: /typesafe-router on to enable automatic routing, or shadow to classify without changing models",
-        );
-      else if (result.classification)
-        lines.push(
-          `routing ready: ${mode === "shadow" ? "shadow mode will classify without selecting models" : "the next idle user request will be routed"}`,
-        );
+        lines.push("routing outside TUI: disabled (allowHeadless is false)");
 
+      progress("Checks complete");
       notify(ctx, lines.join("\n"), ready ? "info" : "warning");
     } catch {
       if (isCurrent(op))
         notify(
           ctx,
-          `pi-typesafe-router: doctor failed\nconfig: ${applied ? "applied" : "not applied"}\nrouting: ${mode}\nchecks: incomplete; routing verification was not granted\nnext: inspect the configuration and Pi model catalogue, then run /typesafe-router doctor again`,
+          `pi-typesafe-router: ❌\nconfig: ${applied ? "applied" : "not applied"}\nrouting: ${mode}\nchecks: incomplete; routing verification was not granted\nnext: inspect the configuration and Pi model catalogue, then run /typesafe-router doctor again`,
           "error",
         );
     } finally {
       const cancelled = !isCurrent(op);
+      op.controller.abort();
+
+      if (ctx.hasUI && ctx.mode === "tui") ctx.ui.setWidget(`${NAME}-doctor-progress`, undefined);
       cleanup();
 
       if (cancelled && !shuttingDown)
         notify(
           ctx,
-          `pi-typesafe-router: doctor cancelled\nconfig: ${applied ? "applied before cancellation" : "not applied"}\nrouting: ${mode}\nchecks: cancelled; routing verification was not granted\nnext: run /typesafe-router doctor when ready`,
+          `pi-typesafe-router: doctor cancelled\nconfig: ${applied ? "applied before cancellation" : "not applied"}\nrouting: ${mode}\nchecks: cancelled; routing verification was not granted`,
           "warning",
         );
     }

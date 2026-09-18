@@ -28,7 +28,7 @@ export type RouterContext = Pick<
   >;
   ui: Pick<
     ExtensionContext["ui"],
-    "notify" | "setStatus" | "confirm" | "onTerminalInput" | "select" | "input"
+    "notify" | "setStatus" | "setWidget" | "confirm" | "onTerminalInput" | "select" | "input"
   >;
 };
 

@@ -1,3 +1,4 @@
+import type { GenerationProbeResult } from "./generation-probe.ts";
 import {
   targetKey,
   type CandidateCheck,
@@ -13,7 +14,13 @@ export interface EvaluationResult {
   failure?: { code: ClassifierFailureCode | "unavailable"; status?: number };
 }
 
-export function runtimeLines(mode: Mode, activity: string, path: string, config?: RouterConfig) {
+export function runtimeLines(
+  mode: Mode,
+  activity: string,
+  path: string,
+  config?: RouterConfig,
+  classifierReport?: readonly string[],
+) {
   return [
     `runtime: node ${process.version} ${process.platform} ${process.arch}`,
     `config path: ${path}`,
@@ -21,13 +28,9 @@ export function runtimeLines(mode: Mode, activity: string, path: string, config?
     `activity: ${activity}`,
     ...(config
       ? [
-          `configured startup mode: ${config.mode}`,
-          `classifier: ${config.backend.type} / ${config.backend.model}`,
-          `credentials: ${config.backend.auth.source === "env" ? `environment ${config.backend.auth.variable}` : `Pi provider ${config.backend.auth.provider}`}`,
-          `routing outside TUI: ${config.allowHeadless ? "enabled when routing is on" : "disabled"}`,
-          `policy: timeout ${config.timeoutMs}ms; minimum confidence ${config.minConfidence}; default ${config.defaultRoute}; uncertain ${config.uncertainRoute}`,
-          `generation probe timeout: ${config.generationProbeTimeoutMs}ms per model`,
-          `context: up to ${config.maxContextChars} characters and ${config.historyMessages} recent text messages; output reserve ${config.outputReserveTokens} tokens`,
+          ...(classifierReport ?? [`classifier: ${config.backend.type} / ${config.backend.model}`]),
+          `auth: ${config.backend.auth.source === "env" ? `environment ${config.backend.auth.variable}` : `Pi provider ${config.backend.auth.provider}`}`,
+          `routing policy: timeout ${config.timeoutMs}ms; minimum confidence ${config.minConfidence}; default ${config.defaultRoute}; uncertain ${config.uncertainRoute}`,
         ]
       : ["classifier: not configured"]),
   ];
@@ -47,15 +50,30 @@ const candidateReasons = new Map(
   }),
 );
 
-export function routeLines(routes: Record<string, CandidateCheck[]>) {
+export function routeLines(
+  routes: Record<string, CandidateCheck[]>,
+  probes: readonly GenerationProbeResult[],
+) {
+  const results = new Map(probes.map((probe) => [targetKey(probe.target), probe]));
+
   return [
-    "routes: local eligibility below; live generation checks are reported separately",
+    "routes:",
     ...Object.entries(routes).flatMap(([route, candidates]) => [
-      `  ${route}: ${candidates.some((candidate) => candidate.eligible) ? "eligible candidate available" : "no eligible candidate"}`,
-      ...candidates.map(
-        (candidate) =>
-          `    ${targetKey(candidate.target)}: ${candidate.eligible ? "eligible locally" : (candidateReasons.get(candidate.reason ?? "") ?? candidate.reason ?? "ineligible; no reason supplied")}`,
-      ),
+      `  ${route}:`,
+      ...candidates.map((candidate) => {
+        const key = targetKey(candidate.target);
+        const probe = results.get(key);
+
+        const outcome = probe
+          ? `${probe.passed ? "✅ passed" : "❌ failed"} in ${probe.milliseconds} ms${probe.passed ? "" : ` (${probe.reason})`}`
+          : "not checked";
+
+        const restriction = candidate.eligible
+          ? ""
+          : `; not routable: ${candidateReasons.get(candidate.reason ?? "") ?? candidate.reason ?? "ineligible; no reason supplied"}`;
+
+        return `    ${key}\n    ${outcome}${restriction}`;
+      }),
     ]),
   ];
 }
@@ -65,7 +83,9 @@ export function classifierLines(result: EvaluationResult, elapsedMs: number, con
     const answer = result.classification;
 
     const lines = [
-      `classifier check: passed in ${elapsedMs}ms (${answer.choice}; confidence ${answer.confidence ?? "unavailable"})`,
+      "classifier:",
+      `  ${config.backend.type} / ${config.backend.model}`,
+      `  ✅ passed in ${elapsedMs} ms (${answer.choice}; confidence ${answer.confidence ?? "unavailable"})`,
     ];
 
     if (
@@ -115,5 +135,10 @@ export function classifierLines(result: EvaluationResult, elapsedMs: number, con
         "check the configured classifier backend and credentials, then run /typesafe-router doctor";
   }
 
-  return [`classifier check: failed (${reason}; ${elapsedMs}ms)`, `next: ${action}`];
+  return [
+    "classifier:",
+    `  ${config.backend.type} / ${config.backend.model}`,
+    `  ❌ failed in ${elapsedMs} ms (${reason})`,
+    `next: ${action}`,
+  ];
 }

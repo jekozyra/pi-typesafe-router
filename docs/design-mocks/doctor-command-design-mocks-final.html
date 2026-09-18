@@ -400,20 +400,24 @@ Auth presence and catalogue metadata are not remote health. Changes require relo
             <div class="frame after">
               <div class="label">After (illustrative, not live results)</div>
               <pre class="surface term">
-pi-typesafe-router: doctor complete
+pi-typesafe-router: ✅
 runtime: node [version] [platform] [arch]
-config: [path] (applied)
+config path: [path]
 routing: off (doctor does not enable routing)
-classifier: typesafe / jev-1.13.0
-credentials: environment TYPESAFE_API_KEY
-routes: local eligibility; live generation checks reported below
-  quick: [provider/model] — eligible locally
-  standard: [provider/model] — eligible locally
-  deep: [provider/model] — eligible locally
-generation check: [provider/model]: passed in [duration]ms
-routing verification: ready; every route has a verified eligible candidate
-classifier check: passed in [duration]ms
-next: /typesafe-router on to enable automatic routing</pre>
+auth: environment TYPESAFE_API_KEY
+classifier:
+  typesafe / jev-1.13.0
+  ✅ passed in [duration] ms
+routes:
+  quick:
+    [provider/model]
+    ✅ passed in [duration] ms
+  standard:
+    [provider/model]
+    ✅ passed in [duration] ms
+  deep:
+    [provider/model]
+    ✅ passed in [duration] ms</pre>
             </div>
           </div>
           <p class="interaction">
@@ -437,11 +441,22 @@ next: /typesafe-router on to enable automatic routing</pre>
           <div class="frame after">
             <div class="label">After (illustrative, not live results)</div>
             <pre class="surface term">
-pi-typesafe-router: doctor running
-config: refreshing
-classifier check: automatic synthetic classifier and generation requests; may incur charges; no conversation history or tools
+Checking configuration…
+Checking model access… (0/4 complete)
+Checking model access… (2/4 complete)
+Checks complete
 
-classifier check: failed (HTTP 401)
+Progress updates one widget above the editor, then clears when checks finish; these illustrative snapshots are not separate TUI notifications.
+Checks use synthetic requests and may incur charges; no conversation history or tools.
+
+routes:
+  deep:
+    [provider/model]
+    ❌ failed in [duration] ms (timeout)
+
+classifier:
+  typesafe / jev-1.13.0
+  ❌ failed in [duration] ms (HTTP 401)
 next: replace the configured classifier key, restart Pi if its environment changed, then run /typesafe-router doctor
 
 classifier check: cancelled; no result was verified

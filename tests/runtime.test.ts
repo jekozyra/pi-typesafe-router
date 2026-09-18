@@ -148,6 +148,12 @@ async function harness(options: Options = {}) {
   const sent: Parameters<ExtensionAPI["sendUserMessage"]>[] = [];
   const statuses: Parameters<ExtensionContext["ui"]["setStatus"]>[] = [];
 
+  const widgets: [
+    key: string,
+    content: string[] | Parameters<ExtensionContext["ui"]["setWidget"]>[1],
+    options?: Parameters<ExtensionContext["ui"]["setWidget"]>[2],
+  ][] = [];
+
   const models = options.models ?? [
     model("quick"),
     model("standard"),
@@ -195,6 +201,9 @@ async function harness(options: Options = {}) {
       },
       setStatus: (...args) => {
         statuses.push(args);
+      },
+      setWidget: (...args) => {
+        widgets.push(args);
       },
       confirm: options.confirm ?? (async () => true),
       onTerminalInput: (handler: TerminalHook) => {
@@ -303,6 +312,7 @@ async function harness(options: Options = {}) {
     entries.length = 0;
     notifications.length = 0;
     statuses.length = 0;
+    widgets.length = 0;
     selections.length = 0;
   }
 
@@ -318,6 +328,7 @@ async function harness(options: Options = {}) {
     notifications,
     sent,
     statuses,
+    widgets,
     terminal,
     input: (overrides: Partial<InputEvent> = {}) =>
       emit("input", { text: PROMPT, source: "interactive", images: [], ...overrides }),
@@ -729,13 +740,27 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
     const doctor = h.command("doctor");
     await entered.promise;
-    const published = [h.entries.length, h.statuses.length, h.notifications.length];
+
+    const published = [
+      h.entries.length,
+      h.statuses.length,
+      h.widgets.length + 1, // Shutdown removes the active progress widget.
+      h.notifications.length,
+    ];
+
     await h.emit("session_shutdown");
     await doctor;
-    assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
+    assert.deepEqual(h.widgets.at(-1), ["typesafe-router-doctor-progress", undefined]);
+    assert.deepEqual(
+      [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
+      published,
+    );
     read.resolve(config({ mode: "auto" }));
     await nextTurn();
-    assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
+    assert.deepEqual(
+      [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
+      published,
+    );
     assert.equal(h.classifications.length, 0);
     assert.deepEqual(h.selections, []);
     assert.equal(h.terminal.size, 0);
@@ -761,10 +786,20 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
         if (interruption === "off") await h.command("off");
         else await h.emit("session_shutdown");
-        const published = [h.entries.length, h.statuses.length, h.notifications.length];
+
+        const published = [
+          h.entries.length,
+          h.statuses.length,
+          h.widgets.length,
+          h.notifications.length,
+        ];
+
         dialog.resolve(true);
         await enabling;
-        assert.deepEqual([h.entries.length, h.statuses.length, h.notifications.length], published);
+        assert.deepEqual(
+          [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
+          published,
+        );
         assert.equal(h.classifications.length, 0);
 
         if (interruption === "off") {
@@ -862,12 +897,23 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       assert.deepEqual(h.sent, []);
       assert.deepEqual(h.decisions(), []);
       const report = h.notifications.at(-1)!;
-      assert.match(report, /pi-typesafe-router: doctor/i);
-      assert.match(report, /config:.*(?:applied|loaded|refreshed)/i);
+      assert.match(report, /^pi-typesafe-router: ✅\n/);
+      assert.match(report, /context usage: \d+ tokens\n/);
+      assert.doesNotMatch(report, /Pi accounting/);
+      assert.doesNotMatch(report, /config: applied|generation health:|routing verification:/);
+      assert.match(report, /routing policy:/);
+      assert.match(report, /current model:/);
+      assert.ok(report.indexOf("classifier:") < report.indexOf("routes:"));
       assert.match(report, /routing: off/i);
-      assert.match(report, /classifier check:.*(?:ok|success|passed)/i);
-      assert.match(report, /local/i);
-      assert.match(report, /generation|probe/i);
+      assert.match(report, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
+      assert.match(report, /    fixture\/quick\n    ✅ passed in \d+ ms/);
+      assert.doesNotMatch(report, /next:|eligible locally|generation check:/);
+      assert.equal(report.match(/classifier:/g)?.length, 1);
+
+      if (mode === "rpc") {
+        assert.equal(h.widgets.length, 0);
+        assert.ok(h.notifications.includes("Checking model access… (4/4 complete)"));
+      }
     });
 
   for (const failure of ["missing", "error"] as const)
@@ -886,6 +932,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
       await h.command("doctor");
       const report = h.notifications.at(-1)!;
+      assert.match(report, /^pi-typesafe-router: ❌\n/);
       assert.match(report, failure === "missing" ? /missing/i : /error|invalid|failed/i);
       assert.match(report, /routing: off/i);
       assert.match(report, /next:/i);
@@ -908,7 +955,8 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 
       await h.command("doctor");
       const report = h.notifications.at(-1)!;
-      assert.match(report, /classifier check:.*(?:failed|error)/i);
+      assert.match(report, /^pi-typesafe-router: ❌\n/);
+      assert.match(report, /classifier:\n  [^\n]+\n  ❌ failed in \d+ ms/i);
       assert.match(report, new RegExp(code, "i"));
       assert.match(report, /next:/i);
 
@@ -959,10 +1007,20 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       else await h.emit("session_shutdown");
       await doctor;
       assert.equal(h.classifications[0][2].signal.aborted, true);
-      const published = [h.notifications.length, h.statuses.length, h.entries.length];
+
+      const published = [
+        h.notifications.length,
+        h.statuses.length,
+        h.widgets.length,
+        h.entries.length,
+      ];
+
       pending.resolve(classification());
       await nextTurn();
-      assert.deepEqual([h.notifications.length, h.statuses.length, h.entries.length], published);
+      assert.deepEqual(
+        [h.notifications.length, h.statuses.length, h.widgets.length, h.entries.length],
+        published,
+      );
       assert.deepEqual(h.selections, []);
       assert.deepEqual(h.sent, []);
     });
@@ -990,7 +1048,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.equal(h.classifications[0][2].signal.aborted, false);
     pending.resolve(classification());
     await doctor;
-    assert.match(h.notifications.at(-1)!, /classifier check:.*(?:ok|success|passed)/i);
+    assert.match(h.notifications.at(-1)!, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
     assert.deepEqual(h.selections, []);
   });
 
@@ -1026,7 +1084,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     read.resolve(config({ mode: "auto" }));
     await doctor;
     assert.equal(h.classifications.length, 1);
-    assert.match(h.notifications.at(-1)!, /classifier check:.*(?:ok|success|passed)/i);
+    assert.match(h.notifications.at(-1)!, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
     assert.match(h.notifications.at(-1)!, /routing: off/i);
   });
 
@@ -1067,7 +1125,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
         },
       });
 
-      const before = [h.entries.length, h.statuses.length];
+      const before = [h.entries.length, h.statuses.length, h.widgets.length];
       await h.command(command);
       assert.match(h.notifications.at(-1)!, /removed/i);
       assert.match(
@@ -1075,7 +1133,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
         command === "recover" ? /\/model/ : command === "cancel" ? /off|Escape/i : /doctor/i,
       );
       assert.equal(reads, 1);
-      assert.deepEqual([h.entries.length, h.statuses.length], before);
+      assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
       assert.equal(h.classifications.length, 0);
       assert.deepEqual(h.selections, []);
       assert.deepEqual(h.sent, []);
@@ -1125,6 +1183,87 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
       assert.deepEqual(await h.input(), { action: "continue" });
       assert.equal(h.classifications.length, 2);
     });
+
+  it("runs classifier and all generation probes concurrently with shared progress", async () => {
+    const classifier = deferred<Classification>();
+    const pending = new Map(["quick", "standard", "deep"].map((id) => [id, deferred<void>()]));
+
+    const h = await harness({
+      unverified: true,
+      config: config({ mode: "off" }),
+      classify: () => classifier.promise,
+      probeGeneration: async (_registry, candidate) => {
+        await pending.get(candidate.model)!.promise;
+
+        return { target: candidate, passed: true, reason: "ok", milliseconds: 12 };
+      },
+    });
+
+    const doctor = h.command("doctor");
+    await nextTurn();
+    assert.equal(h.classifications.length, 1);
+    assert.deepEqual(
+      h.probes.map((args) => args[1].model),
+      ["quick", "standard", "deep"],
+    );
+    assert.ok(
+      h.widgets.some(([, lines]) => Array.isArray(lines) && lines[0] === "Checking configuration…"),
+    );
+    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (0/4 complete)"]);
+    pending.get("deep")!.resolve();
+    await nextTurn();
+    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (1/4 complete)"]);
+    classifier.resolve(classification());
+    await nextTurn();
+    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (2/4 complete)"]);
+    pending.get("standard")!.resolve();
+    pending.get("quick")!.resolve();
+    await doctor;
+    assert.ok(
+      h.widgets.some(
+        ([, lines]) => Array.isArray(lines) && lines[0] === "Checking model access… (4/4 complete)",
+      ),
+    );
+    assert.ok(
+      h.widgets.some(([, lines]) => Array.isArray(lines) && lines[0] === "Checks complete"),
+    );
+    assert.equal(h.widgets.at(-1)?.[1], undefined);
+    assert.ok(h.widgets.every(([key]) => key === "typesafe-router-doctor-progress"));
+    assert.ok(
+      h.widgets.slice(0, -1).every(([, , options]) => options?.placement === "aboveEditor"),
+    );
+    const report = h.notifications.at(-1)!;
+    assert.match(report, /^pi-typesafe-router: ✅/);
+    assert.ok(report.indexOf("fixture/quick") < report.indexOf("fixture/standard"));
+    assert.ok(report.indexOf("fixture/standard") < report.indexOf("fixture/deep"));
+    assert.doesNotMatch(h.notifications.join("\n"), /generation check: testing/);
+  });
+
+  it("unexpected probe failure aborts parallel siblings and ignores late progress", async () => {
+    const pending = deferred<void>();
+
+    const h = await harness({
+      unverified: true,
+      probeGeneration: async (_registry, candidate) => {
+        if (candidate.model === "quick") throw new Error("synthetic failure");
+        await pending.promise;
+
+        return { target: candidate, passed: true, reason: "ok", milliseconds: 1 };
+      },
+    });
+
+    await h.command("doctor");
+    assert.equal(h.probes.length, 3);
+    assert.ok(h.probes.every((args) => args[2].aborted));
+    assert.match(h.notifications.at(-1)!, /^pi-typesafe-router: ❌/);
+    assert.equal(h.widgets.at(-1)?.[1], undefined);
+    const before = [h.statuses.length, h.widgets.length, h.notifications.length];
+    pending.resolve();
+    await nextTurn();
+    assert.deepEqual([h.statuses.length, h.widgets.length, h.notifications.length], before);
+    await h.command("on");
+    assert.match(h.notifications.at(-1)!, /blocked/i);
+  });
 
   it("one failed route blocks all routing even when the selected route passed", async () => {
     const h = await harness({
@@ -1361,9 +1500,13 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
         assert.equal(h.probes[0][2].aborted, true);
       }
 
+      const widgetsBefore = h.widgets.length;
       pending.resolve({ target: target("quick"), passed: true, reason: "ok", milliseconds: 0 });
       await doctor;
       await nextTurn();
+      assert.equal(h.widgets.at(-1)?.[1], undefined);
+
+      if (interruption !== "disk change") assert.equal(h.widgets.length, widgetsBefore);
 
       if (interruption === "shutdown") await h.emit("session_start");
       await h.command("on");
