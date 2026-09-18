@@ -21,8 +21,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 const provider = "router-integration-fixture";
+
 const selectedId = "first-eligible";
+
 const initialId = "initial-and-fallback";
+
 const dummyKey = "integration-dummy-key-not-a-secret";
 
 /** Real Pi loader/session/provider plumbing; only generation and HTTP are synthetic. */
@@ -44,16 +47,19 @@ async function fixture(t: TestContext, failGeneration = false) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+
       await rm(root, { recursive: true, force: true });
     }
   });
   process.env.PI_CODING_AGENT_DIR = agentDir;
   process.env.PI_OFFLINE = "1";
   delete process.env.TEST_TYPESAFE_KEY;
+
   // No paid/network calls are permitted, even if the extension regresses.
   const http = t.mock.method(globalThis, "fetch", async () => {
     throw new Error("Integration smoke tests forbid network requests");
   });
+
   await mkdir(cwd);
   await mkdir(agentDir);
   const chain = [selectedId, initialId].map((model) => ({ provider, model }));
@@ -78,6 +84,7 @@ async function fixture(t: TestContext, failGeneration = false) {
     allowModelNetwork: false,
     refreshOnCreate: false,
   });
+
   const generations: Array<{ provider: string; model: string }> = [];
   modelRuntime.registerProvider(provider, {
     api: "openai-completions",
@@ -95,6 +102,7 @@ async function fixture(t: TestContext, failGeneration = false) {
     streamSimple(model) {
       generations.push({ provider: model.provider, model: model.id });
       const stream = createAssistantMessageEventStream();
+
       const message: AssistantMessage = {
         role: "assistant",
         api: model.api,
@@ -112,7 +120,9 @@ async function fixture(t: TestContext, failGeneration = false) {
         timestamp: Date.now(),
         stopReason: "pending",
       };
+
       stream.push({ type: "start", partial: message });
+
       if (failGeneration) {
         message.stopReason = "error";
         message.errorMessage = "503 synthetic generation failure";
@@ -136,19 +146,24 @@ async function fixture(t: TestContext, failGeneration = false) {
         message.stopReason = "stop";
         stream.push({ type: "done", reason: "stop", message });
       }
+
       stream.end();
+
       return stream;
     },
   });
   await modelRuntime.setRuntimeApiKey(provider, dummyKey);
   const initialModel = modelRuntime.getModel(provider, initialId);
   assert.ok(initialModel);
+
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: { enabled: false },
   });
+
   // Import after setting the profile: no config override API is required.
   const { default: routerExtension } = await import("../src/index.ts");
+
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -162,10 +177,12 @@ async function fixture(t: TestContext, failGeneration = false) {
     appendSystemPrompt: [],
     extensionFactories: [routerExtension],
   });
+
   await resourceLoader.reload();
   assert.deepEqual(resourceLoader.getExtensions().errors, []);
   assert.equal(resourceLoader.getExtensions().extensions.length, 1);
   const sessionManager = SessionManager.inMemory(cwd);
+
   const created = await createAgentSession({
     cwd,
     agentDir,
@@ -177,6 +194,7 @@ async function fixture(t: TestContext, failGeneration = false) {
     settingsManager,
     sessionManager,
   });
+
   session = created.session;
   const errors: ExtensionError[] = [];
   const events: AgentSessionEvent[] = [];
@@ -186,6 +204,7 @@ async function fixture(t: TestContext, failGeneration = false) {
   await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
   assert.deepEqual(errors, []);
   const sendUserMessage = t.mock.method(session, "sendUserMessage");
+
   const records = () =>
     sessionManager
       .getEntries()
@@ -193,6 +212,7 @@ async function fixture(t: TestContext, failGeneration = false) {
         (entry): entry is CustomEntry =>
           entry.type === "custom" && entry.customType.startsWith("typesafe-router"),
       );
+
   return { session, sessionManager, generations, records, errors, events, http, sendUserMessage };
 }
 

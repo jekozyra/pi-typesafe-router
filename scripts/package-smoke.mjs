@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+
 const temp = await mkdtemp(join(tmpdir(), "pi-typesafe-router-package-"));
+
 try {
   const output = JSON.parse(
     execFileSync("npm", ["pack", "--json", "--pack-destination", temp], {
@@ -14,6 +16,7 @@ try {
       stdio: ["ignore", "pipe", "inherit"],
     }),
   );
+
   // npm versions emit either an array or a package-name-keyed object.
   const packed = Array.isArray(output) ? output[0] : output["pi-typesafe-router"];
   assert.ok(packed, "npm pack did not return package metadata");

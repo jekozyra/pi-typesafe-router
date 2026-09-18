@@ -1,40 +1,58 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 import { createClassifier, RUBRIC } from "../src/classifier.ts";
 import { ClassifierError, type Backend, type ClassificationState } from "../src/types.ts";
 
 const auth = { source: "env", variable: "UNUSED" } as const;
+
 const backends: Backend[] = [
   { type: "typesafe", model: "jev-1.13.0", auth },
   { type: "cloudflare", model: "typesafe/jev", accountId: "account", auth },
   { type: "vercel", model: "typesafe-ai/jev", zeroDataRetention: true, auth },
 ];
+
 const state: ClassificationState = { current_request: "private prompt", recent_conversation: [] };
+
 const options = () => ({ signal: new AbortController().signal, apiKey: "secret-key" });
+
 const answer = () => ({
   type: "choice",
   choice: "standard",
   probabilities: { quick: 0.1, standard: 0.7, deep: 0.1, uncertain: 0.1 },
   confidence: 0.8,
 });
+
 const direct = () => ({
   model: "jev-1.13.0",
   answers: { task_class: answer() },
   usage: { input_tokens: 20, output_tokens: 4 },
 });
+
 const sdk = () => ({
   answers: { task_class: answer() },
   providerMetadata: { typesafe: { confidence: { task_class: 0.9 } } },
   usage: { inputTokens: 20, outputTokens: 4 },
 });
-const json = (value: unknown) =>
+
+type JsonFixture =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonFixture[]
+  | { [key: string]: JsonFixture | undefined };
+
+const json = (value: JsonFixture) =>
   new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-const failure = (code: string, status?: number) => (error: unknown) => {
+
+const failure = (code: string, status?: number) => (error: Error) => {
   assert.ok(error instanceof ClassifierError);
   assert.equal(error.code, code);
   assert.equal(error.status, status);
   assert.ok(!String(error).includes("secret"));
   assert.ok(!String(error).includes("private prompt"));
+
   return true;
 };
 
@@ -42,6 +60,7 @@ for (const backend of backends) {
   test(`${backend.type}: actual transport serialization and normalization`, async () => {
     let calls = 0;
     const opts = options();
+
     const classify = createClassifier(async (url, init) => {
       calls++;
       assert.equal(init?.redirect, "error");
@@ -49,7 +68,8 @@ for (const backend of backends) {
       assert.equal(init?.method, "POST");
       const headers = new Headers(init?.headers);
       assert.equal(headers.get("authorization"), "Bearer secret-key");
-      const body = JSON.parse(String(init?.body));
+      const body = z.json().parse(JSON.parse(String(init?.body)));
+
       if (backend.type === "typesafe") {
         assert.equal(String(url), "https://api.typesafe.ai/v1/systemone");
         assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
@@ -68,6 +88,7 @@ for (const backend of backends) {
           providerOptions: { gateway: { zeroDataRetention: true } },
         });
       }
+
       return json(
         backend.type === "vercel"
           ? sdk()
@@ -76,6 +97,7 @@ for (const backend of backends) {
             : direct(),
       );
     });
+
     const result = await classify(backend, state, opts);
     assert.equal(calls, 1);
     assert.equal(result.choice, "standard");
@@ -87,14 +109,17 @@ for (const backend of backends) {
   for (const status of [401, 422, 429, 529, 302]) {
     test(`${backend.type}: HTTP ${status} is safe and never retried`, async () => {
       let calls = 0;
+
       const classify = createClassifier(async (_url, init) => {
         calls++;
         assert.equal(init?.redirect, "error");
+
         return new Response("secret private prompt", {
           status,
           headers: { location: "https://other.invalid" },
         });
       });
+
       await assert.rejects(classify(backend, state, options()), failure("http", status));
       assert.equal(calls, 1);
     });
@@ -104,6 +129,7 @@ for (const backend of backends) {
     const classify = createClassifier(async () => {
       assert.fail("unexpected fetch");
     });
+
     for (const reason of [
       new Error("secret"),
       new DOMException("private prompt", "TimeoutError"),
@@ -115,6 +141,7 @@ for (const backend of backends) {
         failure("cancelled"),
       );
     }
+
     await assert.rejects(
       classify(backend, state, { ...options(), apiKey: " " }),
       failure("credentials"),
@@ -123,6 +150,7 @@ for (const backend of backends) {
 
   test(`${backend.type}: cancellation while reading response body`, async () => {
     const controller = new AbortController();
+
     const classify = createClassifier(
       async () =>
         new Response(
@@ -133,6 +161,7 @@ for (const backend of backends) {
           }),
         ),
     );
+
     await assert.rejects(
       classify(backend, state, { apiKey: "secret", signal: controller.signal }),
       failure("cancelled"),
@@ -143,6 +172,7 @@ for (const backend of backends) {
     const classify = createClassifier(async () => {
       throw new Error("secret private prompt");
     });
+
     await assert.rejects(classify(backend, state, options()), failure("network"));
   });
 
@@ -171,6 +201,7 @@ for (const backend of backends) {
       const classify = createClassifier(async () =>
         json({ ...(backend.type === "vercel" ? sdk() : direct()), answers: { task_class: bad } }),
       );
+
       await assert.rejects(classify(backend, state, options()), failure("invalid-response"));
     });
   }
@@ -181,6 +212,7 @@ test("Cloudflare explicitly accepts bare results and rejects failed/malformed en
     (await createClassifier(async () => json(direct()))(backends[1], state, options())).confidence,
     0.8,
   );
+
   for (const raw of [
     { success: false, result: direct() },
     { success: true },
@@ -199,18 +231,22 @@ test("direct requires confidence; SDK only uses per-question metadata, never ans
     ...direct(),
     answers: { task_class: { ...answer(), confidence: undefined } },
   };
+
   await assert.rejects(
     createClassifier(async () => json(noConfidence))(backends[0], state, options()),
     failure("invalid-response"),
   );
+
   for (const providerMetadata of [undefined, {}, { typesafe: { confidence: {} } }]) {
     const result = await createClassifier(async () => json({ ...sdk(), providerMetadata }))(
       backends[2],
       state,
       options(),
     );
+
     assert.equal(result.confidence, undefined);
   }
+
   for (const confidence of [0.9, { task_class: -1 }, { task_class: "0.9" }, { task_class: null }]) {
     await assert.rejects(
       createClassifier(async () =>
@@ -240,6 +276,7 @@ test("ties accepted; usage omitted rather than invented and unsafe provenance om
         },
       },
     };
+
     const result = await createClassifier(async () => json(raw))(backends[0], state, options());
     assert.equal(result.usage, undefined);
     assert.equal(result.returnedModel, undefined);
@@ -248,6 +285,7 @@ test("ties accepted; usage omitted rather than invented and unsafe provenance om
 
 test("size limit is on streamed bytes, not characters or declared length", async () => {
   let cancelled = false;
+
   const classify = createClassifier(
     async () =>
       new Response(
@@ -263,22 +301,110 @@ test("size limit is on streamed bytes, not characters or declared length", async
         { headers: { "content-length": "1" } },
       ),
   );
+
   await assert.rejects(classify(backends[0], state, options()), failure("invalid-response"));
   assert.equal(cancelled, true);
 });
 
 test("SDK warning text is not logged", async () => {
   const original = console.warn;
-  const logs: unknown[] = [];
-  console.warn = (...args: unknown[]) => {
-    logs.push(args);
+  let warnings = 0;
+  console.warn = () => {
+    warnings++;
   };
+
   try {
     await createClassifier(async () =>
       json({ ...sdk(), warnings: [{ type: "other", message: "secret private prompt" }] }),
     )(backends[2], state, options());
-    assert.deepEqual(logs, []);
+    assert.equal(warnings, 0);
   } finally {
     console.warn = original;
+  }
+});
+
+test("schema boundaries reject non-object answers and confidence without coercion", async () => {
+  for (const raw of [null, [], "secret", { answers: [] }, { answers: { task_class: [] } }]) {
+    for (const backend of backends) {
+      await assert.rejects(
+        createClassifier(async () => json(raw))(backend, state, options()),
+        failure("invalid-response"),
+      );
+    }
+  }
+
+  for (const confidence of [null, "0.8", -1, 1.01]) {
+    for (const backend of backends.slice(0, 2)) {
+      await assert.rejects(
+        createClassifier(async () =>
+          json({
+            ...direct(),
+            answers: { task_class: { ...answer(), confidence } },
+          }),
+        )(backend, state, options()),
+        failure("invalid-response"),
+      );
+    }
+  }
+});
+
+test("Cloudflare envelope markers cannot fall through to a valid bare answer", async () => {
+  for (const markers of [
+    { success: false },
+    { success: null },
+    { result: null },
+    { success: true, result: [] },
+  ]) {
+    await assert.rejects(
+      createClassifier(async () => json({ ...direct(), ...markers }))(
+        backends[1],
+        state,
+        options(),
+      ),
+      failure("invalid-response"),
+    );
+  }
+});
+
+test("optional metadata is sanitized without rejecting a valid direct answer", async () => {
+  for (const usage of [
+    null,
+    [],
+    "secret",
+    { input_tokens: Number.MAX_SAFE_INTEGER + 1, output_tokens: 0 },
+  ]) {
+    for (const model of [null, [], 42, "x".repeat(201)]) {
+      const result = await createClassifier(async () => json({ ...direct(), model, usage }))(
+        backends[0],
+        state,
+        options(),
+      );
+
+      assert.equal(result.choice, "standard");
+      assert.equal(Object.hasOwn(result, "usage"), false);
+      assert.equal(Object.hasOwn(result, "returnedModel"), false);
+    }
+  }
+});
+
+test("gateway missing confidence stays absent and unsafe token counts are omitted", async () => {
+  for (const usage of [
+    {},
+    { inputTokens: 1.5, outputTokens: 0 },
+    { inputTokens: -1, outputTokens: 0 },
+    { inputTokens: Number.MAX_SAFE_INTEGER + 1, outputTokens: 0 },
+  ]) {
+    const result = await createClassifier(async () =>
+      json({
+        ...sdk(),
+        usage,
+        providerMetadata: {},
+        model: "upstream-model",
+      }),
+    )(backends[2], state, options());
+
+    assert.equal(Object.hasOwn(result, "confidence"), false);
+    assert.equal(Object.hasOwn(result, "usage"), false);
+    assert.equal(Object.hasOwn(result, "returnedModel"), false);
   }
 });

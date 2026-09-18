@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig } from "../src/settings.ts";
 import { parseConfig } from "../src/config.ts";
 import { estimateInputTokens, projectState } from "../src/context.ts";
 import { candidateChecks, chooseRoute } from "../src/routing.ts";
 import type { Classification, Eligibility, ModelInfo, Target } from "../src/types.ts";
 
 const target: Target = { provider: "example", model: "organization/model-id" };
+
 const minimal = () => ({
   routes: { quick: [{ ...target }], standard: [{ ...target }], deep: [{ ...target }] },
 });
@@ -37,6 +42,7 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
     ...minimal(),
     backend: { type: "cloudflare", accountId: "aB12".repeat(8) },
   }).backend;
+
   assert.deepEqual(cloudflare, {
     type: "cloudflare",
     model: "typesafe/jev",
@@ -55,6 +61,7 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
       .auth,
     auth,
   );
+
   for (const backend of [
     { type: "cloudflare" },
     { type: "cloudflare", accountId: "g".repeat(32) },
@@ -68,6 +75,7 @@ test("backend defaults, explicit pi credentials, and fixed gateway models", () =
 
 test("malformed env references, implicit pi providers, secrets and unknown keys are rejected safely", () => {
   const secret = "sk-SUPER-SECRET-value";
+
   const invalid: unknown[] = [
     null,
     {},
@@ -81,13 +89,15 @@ test("malformed env references, implicit pi providers, secrets and unknown keys 
       backend: { type: "typesafe", auth: { source: "env", variable } },
     })),
   ];
+
   for (const value of invalid) {
     assert.throws(
       () => parseConfig(value),
-      (error: unknown) => {
+      (error) => {
         assert.ok(error instanceof Error);
         assert.equal(error.message, "Invalid router configuration; check the documented schema.");
         assert.ok(!JSON.stringify(error).includes(secret));
+
         return true;
       },
     );
@@ -123,11 +133,13 @@ test("route chains are nonempty, bounded, unique by exact identity and nonvirtua
   ]) {
     assert.throws(() => parseConfig({ routes: { ...minimal().routes, quick } }));
   }
+
   for (const provider of ["auto", "smart-router", "typesafe-router", "AUTO", "bad/provider", " "]) {
     assert.throws(() =>
       parseConfig({ routes: { ...minimal().routes, quick: [{ provider, model: "model" }] } }),
     );
   }
+
   assert.equal(
     parseConfig({
       routes: { ...minimal().routes, quick: [target, { ...target, provider: "other" }] },
@@ -181,6 +193,7 @@ test("projection keeps a newest fitting suffix; oversized middle messages stop o
     { role: "assistant", content: "x".repeat(20) },
     { role: "user", content: "new" },
   ];
+
   assert.deepEqual(projectState("now", history, 9, 4)?.recent_conversation, [
     { role: "user", text: "new" },
   ]);
@@ -208,16 +221,34 @@ test("token estimate includes system, conversation, tools, unicode and image res
     ]) >
       base + 1200,
   );
+
   const image = (data: string) =>
     estimateInputTokens(
       "",
       [{ role: "user", content: [{ type: "image", mimeType: "image/png", data }] }],
       [],
     );
+
   assert.ok(image("small") > base + 16000);
   assert.equal(image("small"), image("x".repeat(100000)));
-  const circular: { self?: unknown } = {};
+
+  interface CircularFixture {
+    self?: CircularFixture;
+  }
+
+  const circular: CircularFixture = {};
   circular.self = circular;
+  assert.equal(estimateInputTokens("", [circular], []), Infinity);
+});
+
+test("token estimate preserves own __proto__ payloads and cycles", () => {
+  const large = "x".repeat(100_000);
+  const payload = { ["__proto__"]: large };
+
+  assert.ok(estimateInputTokens("", [payload], []) >= Buffer.byteLength(JSON.stringify(payload)));
+
+  const circular = {};
+  Object.defineProperty(circular, "__proto__", { value: circular, enumerable: true });
   assert.equal(estimateInputTokens("", [circular], []), Infinity);
 });
 
@@ -228,6 +259,7 @@ const model: ModelInfo = {
   contextWindow: 10000,
   maxTokens: 4000,
 };
+
 const eligibility = (overrides: Partial<Eligibility> = {}): Eligibility => ({
   models: [model],
   available: [model],
@@ -273,6 +305,7 @@ test("scope uses qualified identity, images require modality, virtual providers 
     )[0]?.eligible,
     true,
   );
+
   for (const provider of ["auto", "smart-router", "typesafe-router"]) {
     const virtual = { ...model, provider };
     assert.equal(
@@ -296,11 +329,13 @@ test("context checks reserve min(configured output, model limit) and reject inva
       ?.eligible,
     true,
   );
+
   for (const value of [0, -1, NaN, Infinity]) {
     assert.equal(
       candidateChecks([target], eligibility({ outputReserveTokens: value }))[0]?.eligible,
       false,
     );
+
     for (const key of ["maxTokens", "contextWindow"]) {
       assert.equal(
         candidateChecks([target], eligibility({ models: [{ ...model, [key]: value }] }))[0]?.reason,
@@ -308,25 +343,114 @@ test("context checks reserve min(configured output, model limit) and reject inva
       );
     }
   }
+
   for (const inputTokens of [-1, NaN, Infinity])
     assert.equal(candidateChecks([target], eligibility({ inputTokens }))[0]?.eligible, false);
 });
 
 test("missing classification uses default; uncertain or missing/low confidence abstains", () => {
   const config = parseConfig({ ...minimal(), defaultRoute: "standard", uncertainRoute: "deep" });
+
   const classification: Classification = {
     choice: "quick",
     confidence: 0.8,
     probabilities: { quick: 1, standard: 0, deep: 0, uncertain: 0 },
     requestedModel: "jev-1.13.0",
   };
+
   assert.equal(chooseRoute(undefined, config), "standard");
   assert.equal(chooseRoute(classification, config), "quick");
+
   for (const confidence of [undefined, 0.799, NaN, Infinity, -1, 1.1]) {
     assert.equal(chooseRoute({ ...classification, confidence }, config), "deep");
   }
+
   assert.equal(
     chooseRoute({ ...classification, choice: "uncertain", confidence: 1 }, config),
     "deep",
   );
+});
+
+test("projection validates malformed blocks without losing valid empty text blocks", () => {
+  assert.deepEqual(
+    projectState(
+      "now",
+      [
+        {
+          role: "user",
+          content: [
+            null,
+            7,
+            { type: "text", text: 42 },
+            { type: "text", text: "" },
+            { type: "image", text: "private" },
+            { type: "text", text: "kept" },
+          ],
+        },
+      ],
+      256,
+      4,
+    )?.recent_conversation,
+    [{ role: "user", text: "\nkept" }],
+  );
+});
+
+test("token estimates fail closed for unsupported values and preserve ancestor identity", () => {
+  for (const value of [() => "secret", Symbol("secret"), 1n, NaN, Infinity, -Infinity]) {
+    assert.equal(estimateInputTokens("", [value], []), Infinity);
+    assert.equal(estimateInputTokens("", [{ nested: value }], []), Infinity);
+  }
+
+  const cycle: unknown[] = [];
+  cycle.push({ nested: cycle });
+  assert.equal(estimateInputTokens("", cycle, []), Infinity);
+  const shared = Object.freeze({ text: "same" });
+  assert.equal(
+    estimateInputTokens("", [shared, shared], []),
+    estimateInputTokens("", [{ text: "same" }, { text: "same" }], []),
+  );
+  assert.equal(estimateInputTokens("", [undefined], []), estimateInputTokens("", [null], []));
+  assert.equal(
+    estimateInputTokens(
+      "",
+      [
+        {
+          get text() {
+            throw new Error("secret");
+          },
+        },
+      ],
+      [],
+    ),
+    Infinity,
+  );
+
+  for (const type of ["image", "image_url", "input_image"]) {
+    assert.equal(
+      estimateInputTokens("", [{ type, source: cycle, data: "long".repeat(10000) }], []),
+      estimateInputTokens("", [{ type, source: "small", data: "small" }], []),
+    );
+  }
+});
+
+test("settings recognizes missing files and sanitizes malformed configurations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-router-settings-"));
+  const path = join(directory, "config.json");
+
+  try {
+    assert.equal(await loadConfig(path), undefined);
+    await writeFile(path, JSON.stringify(minimal()));
+    assert.deepEqual(await loadConfig(path), parseConfig(minimal()));
+
+    for (const text of ["secret-invalid-json", JSON.stringify({ secret: "private" })]) {
+      await writeFile(path, text);
+      await assert.rejects(loadConfig(path), {
+        name: "Error",
+        message:
+          "Invalid or unreadable router config. Check JSON, fields, bounds and model mappings.",
+      });
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

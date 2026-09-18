@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { RouterConfig } from "./types.ts";
 
 const virtualProviders = new Set(["auto", "smart-router", "typesafe-router"]);
+
 const identifier = z
   .string()
   .min(1)
@@ -9,9 +9,11 @@ const identifier = z
   // Reject control characters in identifiers before displaying them in the terminal.
   // oxlint-disable-next-line no-control-regex
   .refine((value) => value.trim() === value && !/\s|[\u0000-\u001f\u007f]/u.test(value));
+
 const provider = identifier.refine(
   (value) => !value.includes("/") && !virtualProviders.has(value.toLowerCase()),
 );
+
 const auth = z.discriminatedUnion("source", [
   z
     .object({
@@ -24,7 +26,9 @@ const auth = z.discriminatedUnion("source", [
     .strict(),
   z.object({ source: z.literal("pi"), provider }).strict(),
 ]);
+
 const envAuth = (variable: string) => ({ source: "env" as const, variable });
+
 const backend = z.discriminatedUnion("type", [
   z
     .object({
@@ -53,16 +57,21 @@ const backend = z.discriminatedUnion("type", [
     })
     .strict(),
 ]);
+
 const target = z.object({ provider, model: identifier }).strict();
+
 const chain = z
   .array(target)
   .min(1)
   .max(8)
   .refine((targets) => {
     const keys = targets.map(({ provider, model }) => JSON.stringify([provider, model]));
+
     return new Set(keys).size === keys.length;
   });
+
 const route = z.enum(["quick", "standard", "deep"]);
+
 const schema = z
   .object({
     version: z.literal(1).default(1),
@@ -85,9 +94,6 @@ const schema = z
   .strict();
 
 /** Never expose Zod issues: even paths and unknown-key diagnostics can contain secrets. */
-export function parseConfig(value: unknown): RouterConfig {
-  const result = schema.safeParse(value);
-  if (!result.success)
-    throw new Error("Invalid router configuration; check the documented schema.");
-  return result.data;
-}
+export const parseConfig = schema.catch(() => {
+  throw new Error("Invalid router configuration; check the documented schema.");
+}).parse;
