@@ -33,7 +33,9 @@ Verify your configuration, then enable routing:
 /typesafe-router on
 ```
 
-Doctor tests the classifier and configured models with synthetic requests, without sending your conversation, using tools, or changing the selected model.
+Doctor tests the classifier and configured models with synthetic requests, without sending your conversation, using tools, or changing the selected model. These checks may incur charges.
+
+Run `/typesafe-router help` for a table explaining every command.
 
 ## Configuration
 
@@ -50,7 +52,6 @@ To use one:
 | TypeSafe              | `TYPESAFE_API_KEY`                                        | `jev-1.13.0`      |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_TOKEN`, account and gateway IDs in config | `typesafe/jev`    |
 | Vercel AI Gateway     | `AI_GATEWAY_API_KEY`                                      | `typesafe-ai/jev` |
-
 
 ## Project structure
 

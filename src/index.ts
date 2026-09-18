@@ -48,7 +48,19 @@ const DISCLOSURE =
   "Classification sends your request and bounded recent user/assistant text to the configured backend. Text can contain private code or secrets. Shadow mode also sends data and may incur charges. No automatic generation replay or classifier-backend failover.";
 
 const HELP =
-  "/typesafe-router setup [typesafe|cloudflare|vercel] | doctor | status | on | shadow | off";
+  "/typesafe-router setup [typesafe|cloudflare|vercel] | doctor | status | on | shadow | off | help";
+
+const COMMAND_HELP = `Usage: /typesafe-router <command>
+
+Command                              Description
+---------------                      ------------------------------------
+setup [typesafe|cloudflare|vercel]   Create a config interactively.
+doctor                               Apply and validate config..
+status                               Show current settings and activity.
+on                                   Enable automatic routing.
+shadow                               Classify without switching models.
+off                                  Disable routing.
+help                                 Show this table.`;
 
 interface Decision {
   route: Route;
@@ -936,6 +948,12 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
       if (extra.length || (option && command !== "setup")) {
         notify(ctx, HELP, "warning");
+
+        return;
+      }
+
+      if (command === "help") {
+        notify(ctx, COMMAND_HELP);
 
         return;
       }

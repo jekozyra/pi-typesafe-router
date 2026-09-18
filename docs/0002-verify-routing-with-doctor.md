@@ -10,7 +10,7 @@ Separate reload, validation, and network-check commands also make it easy to ins
 
 ## Decision
 
-We consolidate configuration refresh, local eligibility checks, classifier testing, and generation probes into `/typesafe-router doctor`. We keep `status` read-only. The command surface is `setup`, `doctor`, `status`, `on`, `shadow`, and `off`; omitted subcommands show status. Old check/validate/reload/recover/cancel commands are not part of the contract.
+We consolidate configuration refresh, local eligibility checks, classifier testing, and generation probes into `/typesafe-router doctor`. We keep `status` and `help` read-only. The command surface is `setup`, `doctor`, `status`, `on`, `shadow`, `off`, and `help`; omitted subcommands show status. Help prints a command table without reading configuration, making network calls, or interrupting active work. Old check/validate/reload/recover/cancel commands are not part of the contract.
 
 ### Verification is required, not inferred
 

@@ -1025,6 +1025,62 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       assert.deepEqual(h.sent, []);
     });
 
+  for (const invalid of [false, true])
+    it(`help is read-only while busy with ${invalid ? "invalid" : "missing"} config`, async () => {
+      let reads = 0;
+
+      const h = await harness({
+        unverified: true,
+        idle: false,
+        load: async () => {
+          reads++;
+
+          if (invalid) throw new Error("Invalid config");
+
+          return undefined;
+        },
+      });
+
+      const before = [h.entries.length, h.statuses.length, h.widgets.length];
+      await h.command("help");
+      const output = h.notifications.at(-1)!;
+      assert.match(output, /Command +Description/);
+
+      for (const command of ["setup", "doctor", "status", "on", "shadow", "off", "help"])
+        assert.match(output, new RegExp(`^${command} +`, "m"));
+
+      assert.match(output, /typesafe, cloudflare, vercel/);
+      assert.match(output, /may charge/);
+      assert.equal(reads, 1);
+      assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
+      assert.deepEqual(h.classifications, []);
+      assert.deepEqual(h.probes, []);
+      assert.deepEqual(h.selections, []);
+      assert.deepEqual(h.sent, []);
+    });
+
+  it("help does not cancel an active classification", async () => {
+    const entered = deferred<void>();
+    const pending = deferred<Classification>();
+
+    const h = await harness({
+      classify: () => {
+        entered.resolve();
+
+        return pending.promise;
+      },
+    });
+
+    const input = h.input();
+    await entered.promise;
+    await h.command("help");
+    assert.match(h.notifications.at(-1)!, /Command +Description/);
+    assert.equal(h.classifications[0][2].signal.aborted, false);
+    pending.resolve(classification());
+    assert.deepEqual(await input, { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
+  });
+
   it("doctor holds the lock through classification; status observes without cancelling", async () => {
     const entered = deferred<void>();
     const pending = deferred<Classification>();
