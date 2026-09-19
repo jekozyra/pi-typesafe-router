@@ -19,6 +19,7 @@ const repository = new github.Repository(
     allowMergeCommit: false,
     allowRebaseMerge: false,
     allowSquashMerge: true,
+    allowUpdateBranch: true,
     deleteBranchOnMerge: true,
     squashMergeCommitTitle: "PR_TITLE",
     squashMergeCommitMessage: "BLANK",
@@ -30,7 +31,6 @@ const repository = new github.Repository(
     // This stack owns merge behavior only. Product metadata remains managed in GitHub.
     ignoreChanges: [
       "allowForking",
-      "allowUpdateBranch",
       "archived",
       "defaultBranch",
       "description",
