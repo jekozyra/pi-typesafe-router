@@ -2,9 +2,13 @@ import * as github from "@pulumi/github";
 import * as pulumi from "@pulumi/pulumi";
 
 const config = new pulumi.Config();
+
 const repositoryName = config.require("repository");
+
 const deploymentReviewer = config.require("deploymentReviewer");
+
 const releaseAppIntegrationId = config.requireNumber("releaseAppIntegrationId");
+
 const deploymentReviewerUser = github.getUserOutput({ username: deploymentReviewer });
 
 const repository = new github.Repository(
@@ -94,6 +98,7 @@ const mainRuleset = new github.RepositoryRuleset(
       requiredLinearHistory: true,
       requiredStatusChecks: {
         requiredChecks: [
+          { context: "Checks / lint-and-format" },
           { context: "Checks / test (22)" },
           { context: "Checks / test (24)" },
           { context: "release / changeset", integrationId: releaseAppIntegrationId },
@@ -116,6 +121,9 @@ const mainRuleset = new github.RepositoryRuleset(
 );
 
 export const repositoryUrl = repository.htmlUrl;
+
 export const deploymentEnvironmentName = deploymentEnvironment.environment;
+
 export const deploymentReviewerLogin = deploymentReviewerUser.login;
+
 export const mainRulesetId = mainRuleset.rulesetId;

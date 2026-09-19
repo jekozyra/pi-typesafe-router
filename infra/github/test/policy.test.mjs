@@ -9,6 +9,11 @@ import { parse } from "yaml";
 const workflowPath = fileURLToPath(
   new URL("../../../.github/workflows/deploy-github-infrastructure.yml", import.meta.url),
 );
+
+const checksWorkflowPath = fileURLToPath(
+  new URL("../../../.github/workflows/ci.yml", import.meta.url),
+);
+
 const infraUrl = new URL("../", import.meta.url);
 
 test("deployment workflow previews before an approved apply", async () => {
@@ -81,9 +86,11 @@ test("deployment workflow previews before an approved apply", async () => {
   assert.doesNotMatch(JSON.stringify(workflow), /PULUMI_ACCESS_TOKEN/);
   assert.equal(previewPulumi.with.plan, "${{ github.workspace }}/pulumi.plan");
   assert.equal(deployPulumi.with.plan, previewPulumi.with.plan);
+
   for (const step of [...preview.steps, ...deploy.steps]) {
     if (step.uses) assert.match(step.uses, /@[0-9a-f]{40}$/);
   }
+
   assert.match(
     JSON.stringify(preview),
     /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
@@ -95,12 +102,28 @@ test("deployment workflow previews before an approved apply", async () => {
   assert.doesNotMatch(JSON.stringify(preview), /GH_ADMIN_TOKEN/);
 });
 
+test("lint and formatting run independently from tests", async () => {
+  const workflow = parse(await readFile(checksWorkflowPath, "utf8"));
+  const qualityJob = workflow.jobs["lint-and-format"];
+  const testJob = workflow.jobs.test;
+
+  assert.deepEqual(Object.keys(workflow.on), ["pull_request", "push"]);
+  assert.equal(workflow.on.pull_request, null);
+  assert.deepEqual(workflow.on.push.branches, ["main"]);
+  assert.equal(qualityJob.needs, undefined);
+  assert.equal(testJob.needs, undefined);
+  assert.ok(qualityJob.steps.some(({ run }) => run === "npm run check:quality"));
+  assert.ok(testJob.steps.some(({ run }) => run === "npm test"));
+  assert.ok(testJob.steps.every(({ run }) => run !== "npm run check"));
+});
+
 test("main requires up-to-date CI and release validation", async () => {
   const resources = [];
   pulumi.runtime.setMocks(
     {
       newResource: (args) => {
         resources.push(args);
+
         return { id: `${args.name}-id`, state: args.inputs };
       },
       call: (args) =>
@@ -120,12 +143,15 @@ test("main requires up-to-date CI and release validation", async () => {
 
   const program = await import(`../index.ts?checks=${Date.now()}`);
   await program.mainRulesetId.promise();
+
   const ruleset = resources.find(
     ({ type }) => type === "github:index/repositoryRuleset:RepositoryRuleset",
   );
+
   assert.ok(ruleset);
   assert.equal(ruleset.inputs.rules.requiredStatusChecks.strictRequiredStatusChecksPolicy, true);
   assert.deepEqual(ruleset.inputs.rules.requiredStatusChecks.requiredChecks, [
+    { context: "Checks / lint-and-format" },
     { context: "Checks / test (22)" },
     { context: "Checks / test (24)" },
     { context: "release / changeset", integrationId: 123456 },
@@ -138,6 +164,7 @@ test("deployment environment requires a protected-branch reviewer", async () => 
     {
       newResource: (args) => {
         resources.push(args);
+
         return { id: `${args.name}-id`, state: args.inputs };
       },
       call: (args) =>
@@ -164,6 +191,7 @@ test("deployment environment requires a protected-branch reviewer", async () => 
   const environment = resources.find(
     ({ type }) => type === "github:index/repositoryEnvironment:RepositoryEnvironment",
   );
+
   assert.ok(environment);
   assert.equal(environment.inputs.environment, "github-infrastructure");
   assert.equal(environment.inputs.canAdminsBypass, false);

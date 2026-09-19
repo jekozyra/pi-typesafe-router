@@ -10,6 +10,7 @@ This Pulumi project is the source of truth for GitHub merge settings, the active
 - changes to `main` require a pull request
 - linear history required
 - branch deletion and force pushes blocked
+- lint/format, Node.js 22/24 test, and release checks required before merge
 - repository administrators may always bypass the ruleset
 - no approving review or resolved-conversation requirement
 - every workflow deployment requires approval from the configured environment reviewer
@@ -84,7 +85,7 @@ A push to `main` triggers `.github/workflows/deploy-github-infrastructure.yml` o
 
 After preview succeeds, the deployment job pauses at the protected environment so `jekozyra` can review the preview before approving `pulumi up` with that exact plan. Apply does not refresh or recalculate the approved plan; state changes make it fail and require a new preview. The job refuses to deploy if a newer commit reached `main` while approval was pending. Concurrent runs are serialized, active updates are never cancelled, and superseded pending revisions may be coalesced by GitHub.
 
-Pull-request CI runs `npm run check` without GitHub credentials. It validates the Pulumi TypeScript program but cannot preview or apply repository administration changes.
+Pull-request CI runs repository lint and formatting checks independently from the test matrix. The Node.js 22 test job runs `npm run check` in this directory without GitHub credentials; it validates the Pulumi TypeScript program but cannot preview or apply repository administration changes.
 
 ## Drift checks
 
