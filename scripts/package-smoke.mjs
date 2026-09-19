@@ -9,16 +9,33 @@ const root = resolve(import.meta.dirname, "..");
 const temp = await mkdtemp(join(tmpdir(), "pi-typesafe-router-package-"));
 
 try {
-  const output = JSON.parse(
-    execFileSync("npm", ["pack", "--json", "--pack-destination", temp], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "inherit"],
-    }),
-  );
+  const suppliedTarball = process.env.PACKAGE_TARBALL;
+  let packed;
 
-  // npm versions emit either an array or a package-name-keyed object.
-  const packed = Array.isArray(output) ? output[0] : output["pi-typesafe-router"];
+  if (suppliedTarball) {
+    const filename = resolve(suppliedTarball);
+    const listing = execFileSync("tar", ["-tzf", filename], { encoding: "utf8" });
+    packed = {
+      filename,
+      files: listing
+        .trim()
+        .split("\n")
+        .filter((path) => path.startsWith("package/"))
+        .map((path) => ({ path: path.slice("package/".length) })),
+    };
+  } else {
+    const output = JSON.parse(
+      execFileSync("npm", ["pack", "--json", "--pack-destination", temp], {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "inherit"],
+      }),
+    );
+
+    // npm versions emit either an array or a package-name-keyed object.
+    packed = Array.isArray(output) ? output[0] : output["pi-typesafe-router"];
+  }
+
   assert.ok(packed, "npm pack did not return package metadata");
   assert.ok(packed.files.some((file) => file.path === "src/index.ts"));
 
@@ -46,6 +63,7 @@ try {
     ),
     "Unexpected package artifact",
   );
+  const archive = suppliedTarball ? packed.filename : join(temp, packed.filename);
   await writeFile(join(temp, "package.json"), '{"private":true,"type":"module"}\n');
   execFileSync(
     "npm",
@@ -54,7 +72,7 @@ try {
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
-      join(temp, packed.filename),
+      archive,
       "@earendil-works/pi-coding-agent@0.85.1",
       "@earendil-works/pi-ai@0.85.1",
       "@earendil-works/pi-tui@0.85.1",
