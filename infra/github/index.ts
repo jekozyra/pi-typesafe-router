@@ -4,6 +4,7 @@ import * as pulumi from "@pulumi/pulumi";
 const config = new pulumi.Config();
 const repositoryName = config.require("repository");
 const deploymentReviewer = config.require("deploymentReviewer");
+const releaseAppIntegrationId = config.requireNumber("releaseAppIntegrationId");
 const deploymentReviewerUser = github.getUserOutput({ username: deploymentReviewer });
 
 const repository = new github.Repository(
@@ -91,6 +92,14 @@ const mainRuleset = new github.RepositoryRuleset(
       deletion: true,
       nonFastForward: true,
       requiredLinearHistory: true,
+      requiredStatusChecks: {
+        requiredChecks: [
+          { context: "Checks / test (22)" },
+          { context: "Checks / test (24)" },
+          { context: "release / changeset", integrationId: releaseAppIntegrationId },
+        ],
+        strictRequiredStatusChecksPolicy: true,
+      },
       pullRequest: {
         allowedMergeMethods: ["squash"],
         dismissStaleReviewsOnPush: false,

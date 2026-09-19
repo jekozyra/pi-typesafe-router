@@ -8,6 +8,11 @@ const workflow = await readFile(
   "utf8",
 );
 
+const prepareWorkflow = await readFile(
+  new URL("../.github/workflows/prepare-release.yml", import.meta.url),
+  "utf8",
+);
+
 const packageJson = z
   .object({
     files: z.array(z.string()),
@@ -45,6 +50,18 @@ test("workflow uses scoped App and OpenRouter credentials without executing PR c
 test("per-PR reconciliation is serialized without cancelling an active write", () => {
   assert.match(workflow, /group: changeset-\$\{\{ github\.event\.pull_request\.number \}\}/);
   assert.match(workflow, /cancel-in-progress: false/);
+});
+
+test("release preparation is manual, version-only, serialized, and App-authored", () => {
+  assert.match(prepareWorkflow, /workflow_dispatch:/);
+  assert.match(prepareWorkflow, /group: release/);
+  assert.match(prepareWorkflow, /cancel-in-progress: false/);
+  assert.match(prepareWorkflow, /candidate\.ts preflight/);
+  assert.match(prepareWorkflow, /steps\.preflight\.outputs\.pending == 'true'/);
+  assert.match(prepareWorkflow, /changesets\/action@06245a4e0a36c064a573d4150030f5ec548e4fcc/);
+  assert.match(prepareWorkflow, /version: npm run release:version/);
+  assert.doesNotMatch(prepareWorkflow, /publish:/);
+  assert.doesNotMatch(prepareWorkflow, /id-token: write/);
 });
 
 test("Changesets and repository metadata are configured while automation stays unpublished", () => {

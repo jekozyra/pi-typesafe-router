@@ -1,0 +1,53 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Create repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+          permission-pull-requests: write
+      - name: Require the previous release to be complete
+        id: preflight
+        env:
+          GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: ./node_modules/.bin/tsx scripts/release/candidate.ts preflight
+      - name: Create or update release pull request
+        if: steps.preflight.outputs.pending == 'true'
+        uses: changesets/action@06245a4e0a36c064a573d4150030f5ec548e4fcc # v1.4.10
+        with:
+          version: npm run release:version
+          commit: "chore: release pi-typesafe-router"
+          title: "chore: release pi-typesafe-router"
+          createGithubReleases: false
+          setupGitUser: false
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

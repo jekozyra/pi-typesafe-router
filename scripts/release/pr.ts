@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { isManagedReleasePullRequest, validateReleaseCandidate } from "./candidate.ts";
 import { buildModelInput, type PullRequestFile } from "./input.ts";
 import { createReleaseModels, type ReleaseModels } from "./models.ts";
 import {
@@ -23,7 +24,11 @@ export interface PullRequestState {
   labels: readonly string[];
   headRepository: string;
   baseRepository: string;
+  baseRef: string;
+  headRef: string;
+  author: string;
   headSha: string;
+  baseSha: string;
   labelActors: Readonly<Record<string, string | undefined>>;
   latestCommit?: { author: string; files: readonly string[] };
 }
@@ -51,7 +56,7 @@ export interface PullRequestPort {
 export interface AutomationResult {
   impact: ReleaseImpact;
   headSha: string;
-  source: "model" | "override" | "verified-bot-update";
+  source: "model" | "override" | "verified-bot-update" | "release-candidate";
 }
 
 function canOverride(permission: Awaited<ReturnType<PullRequestPort["permission"]>>): boolean {
@@ -67,6 +72,50 @@ export async function runPullRequestAutomation(
 ): Promise<AutomationResult> {
   if (pr.headRepository !== pr.baseRepository)
     throw new Error("fork-pull-requests-are-not-supported");
+
+  if (
+    isManagedReleasePullRequest({
+      headRepository: pr.headRepository,
+      baseRepository: pr.baseRepository,
+      baseRef: pr.baseRef,
+      headRef: pr.headRef,
+      author: pr.author,
+      expectedBot: botLogin,
+    })
+  ) {
+    const files = await port.listFiles();
+
+    const [packageJson, packageLock, changelog, basePackageJson, basePackageLock] =
+      await Promise.all([
+        port.readFile("package.json", pr.headSha),
+        port.readFile("package-lock.json", pr.headSha),
+        port.readFile("CHANGELOG.md", pr.headSha),
+        port.readFile("package.json", pr.baseSha),
+        port.readFile("package-lock.json", pr.baseSha),
+      ]);
+
+    if (!packageJson || !packageLock || !changelog || !basePackageJson || !basePackageLock)
+      throw new Error("release-candidate-files-unavailable");
+
+    const version = validateReleaseCandidate({
+      changed: files,
+      packageJson,
+      packageLock,
+      changelog,
+      basePackageJson,
+      basePackageLock,
+    });
+
+    await port.assertHead(pr.headSha);
+    await port.check({
+      name: CHECK_NAME,
+      headSha: pr.headSha,
+      conclusion: "success",
+      summary: `Validated managed release candidate v${version}.`,
+    });
+
+    return { impact: "none", headSha: pr.headSha, source: "release-candidate" };
+  }
 
   const path = generatedChangesetPath(pr.number);
   const override = parseReleaseLabels(pr.labels);
@@ -168,7 +217,12 @@ const eventSchema = z.object({
     title: z.string(),
     body: z.string().nullable(),
     labels: z.array(z.object({ name: z.string() })),
-    base: z.object({ repo: z.object({ full_name: z.string() }) }),
+    user: z.object({ login: z.string() }),
+    base: z.object({
+      sha: z.string(),
+      ref: z.string(),
+      repo: z.object({ full_name: z.string() }),
+    }),
     head: z.object({ sha: z.string(), ref: z.string(), repo: z.object({ full_name: z.string() }) }),
   }),
   repository: z.object({ name: z.string(), owner: z.object({ login: z.string() }) }),
@@ -512,7 +566,11 @@ async function main(): Promise<void> {
     labels,
     headRepository: pull.head.repo.full_name,
     baseRepository: pull.base.repo.full_name,
+    baseRef: pull.base.ref,
+    headRef: pull.head.ref,
+    author: pull.user.login,
     headSha: pull.head.sha,
+    baseSha: pull.base.sha,
     labelActors,
     latestCommit,
   };
