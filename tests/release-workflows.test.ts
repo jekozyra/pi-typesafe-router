@@ -21,7 +21,7 @@ test("privileged workflow runs trusted base code and rejects forks before secret
   assert.match(workflow, /reject-fork:/);
   assert.match(
     workflow,
-    /head\.repo\.full_name != github\.event\.pull_request\.base\.repo\.full_name/,
+    /head\.repo\.id != github\.event\.pull_request\.base\.repo\.id/,
   );
   assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.doesNotMatch(workflow, /pull_request\.head\.sha/);
