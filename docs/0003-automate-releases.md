@@ -64,7 +64,7 @@ Existing npm versions, tags, releases, ambiguous registry responses, stale candi
 
 Create a GitHub App installed only on `jekozyra/pi-typesafe-router`. Grant **Contents: read/write**, **Checks: read/write**, **Pull requests: read**, and **Metadata: read**. Add these Actions secrets:
 
-- `RELEASE_APP_ID`
+- `RELEASE_APP_CLIENT_ID` — the App's public client ID, used to mint installation tokens
 - `RELEASE_APP_PRIVATE_KEY`
 - `OPENROUTER_API_KEY`
 
