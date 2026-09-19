@@ -270,7 +270,7 @@ const issueEventsSchema = z.array(
   }),
 );
 
-class GitHubPort implements PullRequestPort {
+export class GitHubPort implements PullRequestPort {
   constructor(
     private readonly token: string,
     private readonly owner: string,
@@ -385,10 +385,19 @@ class GitHubPort implements PullRequestPort {
 
     if (!response.ok) throw new Error(`github-api-${response.status}`);
 
+    const releaseMetadata = ["package.json", "package-lock.json", "CHANGELOG.md"].includes(path);
+    const maxBytes = releaseMetadata ? 1024 * 1024 : 8 * 1024;
+
+    const sizeError = releaseMetadata
+      ? "release-candidate-file-too-large"
+      : "generated-changeset-too-large";
+
     const declared = Number(response.headers.get("content-length"));
 
-    if (Number.isFinite(declared) && declared > 8 * 1024)
-      throw new Error("generated-changeset-too-large");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await response.body?.cancel();
+      throw new Error(sizeError);
+    }
 
     const reader = response.body?.getReader();
 
@@ -404,9 +413,9 @@ class GitHubPort implements PullRequestPort {
 
       length += value.byteLength;
 
-      if (length > 8 * 1024) {
+      if (length > maxBytes) {
         await reader.cancel();
-        throw new Error("generated-changeset-too-large");
+        throw new Error(sizeError);
       }
 
       chunks.push(value);
