@@ -97,7 +97,7 @@ test("preparation is a no-op without changesets and rejects duplicate managed PR
   assert.throws(() => validatePreparationState(["pr-1.md"], 2), /multiple-managed/);
 });
 
-test("preparation requires the current version on npm with matching tag and release", async () => {
+test("preparation accepts complete releases and a fully absent initial release", async () => {
   const urls: string[] = [];
   await validatePriorPublication(
     "owner/repo",
@@ -111,12 +111,41 @@ test("preparation requires the current version on npm with matching tag and rele
   );
   assert.equal(urls.length, 3);
 
+  await validatePriorPublication(
+    "owner/repo",
+    "token",
+    '{"name":"pi-typesafe-router","version":"0.1.0"}',
+    async () => new Response("", { status: 404 }),
+  );
+});
+
+test("preparation rejects partially complete or ambiguous prior releases", async () => {
   await assert.rejects(
     validatePriorPublication(
       "owner/repo",
       "token",
       '{"name":"pi-typesafe-router","version":"0.1.0"}',
       async (url) => new Response("", { status: String(url).includes("releases") ? 404 : 200 }),
+    ),
+    /incomplete/,
+  );
+
+  await assert.rejects(
+    validatePriorPublication(
+      "owner/repo",
+      "token",
+      '{"name":"pi-typesafe-router","version":"0.1.0"}',
+      async () => new Response("", { status: 500 }),
+    ),
+    /incomplete/,
+  );
+
+  await assert.rejects(
+    validatePriorPublication(
+      "owner/repo",
+      "token",
+      '{"name":"pi-typesafe-router","version":"0.1.1"}',
+      async () => new Response("", { status: 404 }),
     ),
     /incomplete/,
   );
