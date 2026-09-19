@@ -36,7 +36,7 @@
     "smoke:package": "node scripts/package-smoke.mjs",
     "prepack": "npm run typecheck",
     "changeset": "changeset",
-    "release:version": "changeset version && npm install --package-lock-only --ignore-scripts"
+    "release:version": "changeset version && tsx scripts/release/version.ts"
   },
   "dependencies": {
     "ai": "7.0.105",
