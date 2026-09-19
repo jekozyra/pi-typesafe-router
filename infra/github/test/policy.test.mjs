@@ -197,6 +197,14 @@ test("deployment environment requires a protected-branch reviewer", async () => 
     ({ type }) => type === "github:index/repositoryEnvironment:RepositoryEnvironment",
   );
 
+  const repository = resources.find(({ type }) => type === "github:index/repository:Repository");
+
+  assert.ok(repository);
+  assert.equal(repository.inputs.allowUpdateBranch, true);
+
+  const source = await readFile(new URL("index.ts", infraUrl), "utf8");
+
+  assert.doesNotMatch(source, /"allowUpdateBranch"/);
   assert.ok(environment);
   assert.equal(environment.inputs.environment, "github-infrastructure");
   assert.equal(environment.inputs.canAdminsBypass, false);
