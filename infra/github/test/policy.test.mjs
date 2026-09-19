@@ -107,6 +107,9 @@ test("lint and formatting run independently from tests", async () => {
   const qualityJob = workflow.jobs["lint-and-format"];
   const testJob = workflow.jobs.test;
 
+  assert.deepEqual(Object.keys(workflow.on), ["pull_request", "push"]);
+  assert.equal(workflow.on.pull_request, null);
+  assert.deepEqual(workflow.on.push.branches, ["main"]);
   assert.equal(qualityJob.needs, undefined);
   assert.equal(testJob.needs, undefined);
   assert.ok(qualityJob.steps.some(({ run }) => run === "npm run check:quality"));
