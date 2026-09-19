@@ -1,0 +1,6 @@
+name: pi-typesafe-router-repository
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: GitHub repository settings and main branch governance for pi-typesafe-router

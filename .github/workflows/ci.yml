@@ -16,7 +16,16 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            infra/github/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npm run check
+      - name: Check GitHub infrastructure
+        if: matrix.node == 22
+        working-directory: infra/github
+        run: |
+          npm ci --ignore-scripts
+          npm run check
       - run: npm run smoke:package
         if: matrix.node == 22
