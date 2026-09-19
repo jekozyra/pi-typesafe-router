@@ -488,9 +488,12 @@ async function main(): Promise<void> {
   const token = process.env.GITHUB_APP_TOKEN ?? "";
   const apiKey = process.env.OPENROUTER_API_KEY ?? "";
   const botLogin = process.env.GITHUB_APP_BOT_LOGIN ?? "";
+  const classifierModel = process.env.RELEASE_CLASSIFIER_MODEL ?? "";
+  const writerModel = process.env.RELEASE_WRITER_MODEL ?? "";
   const eventPath = process.env.GITHUB_EVENT_PATH;
 
-  if (!token || !botLogin || !eventPath) throw new Error("missing-workflow-configuration");
+  if (!token || !botLogin || !classifierModel || !writerModel || !eventPath)
+    throw new Error("missing-workflow-configuration");
   const event = eventSchema.parse(JSON.parse(await readFile(eventPath, "utf8")));
   const pull = event.pull_request;
   const owner = event.repository.owner.login;
@@ -515,7 +518,12 @@ async function main(): Promise<void> {
   };
 
   let releaseModels: ReleaseModels | undefined;
-  const getModels = () => (releaseModels ??= createReleaseModels(apiKey));
+
+  const getModels = () =>
+    (releaseModels ??= createReleaseModels(apiKey, undefined, {
+      classifier: classifierModel,
+      writer: writerModel,
+    }));
 
   const models: ReleaseModels = {
     classify(input, signal) {

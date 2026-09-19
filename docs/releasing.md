@@ -6,7 +6,7 @@ Release automation is being introduced in milestones. The automated PR changeset
 
 For same-repository pull requests, `.github/workflows/changeset.yml` runs trusted code from the base revision with `pull_request_target`. It never checks out, installs, or executes pull-request code. It reads GitHub's diff API as bounded data.
 
-The controller asks `typesafe/jev-1.13` for `none`, `patch`, `minor`, or `major`. For releasable changes, `openai/gpt-5.6-luna` writes the changelog prose. Both requests go through OpenRouter. Deterministic code owns the package name, filename, frontmatter, and bump mapping. Because this package remains pre-1.0, `major` is recorded as a Changesets `minor` bump while its breaking-change wording is retained.
+The controller asks the model configured by the `RELEASE_CLASSIFIER_MODEL` Actions variable for `none`, `patch`, `minor`, or `major`. For releasable changes, the `RELEASE_WRITER_MODEL` model writes the changelog prose. Both requests go through OpenRouter. Deterministic code owns the package name, filename, frontmatter, and bump mapping. Because this package remains pre-1.0, `major` is recorded as a Changesets `minor` bump while its breaking-change wording is retained.
 
 A releasable PR owns `.changeset/pr-<number>.md`. Regeneration overwrites edits to that generated file. A `none` decision removes an obsolete generated file. The head-specific `release / changeset` check reports successful `none` decisions explicitly. Errors, incomplete or oversized diffs, missing binary patches, stale branch writes, and invalid model output fail closed.
 
@@ -38,6 +38,13 @@ Create a dedicated GitHub App installed only on `jekozyra/pi-typesafe-router`. G
 - `RELEASE_APP_ID`
 - `RELEASE_APP_PRIVATE_KEY`
 - `OPENROUTER_API_KEY`
+
+Configure these repository Actions variables:
+
+- `RELEASE_CLASSIFIER_MODEL` (initially `typesafe/jev-1.13`)
+- `RELEASE_WRITER_MODEL` (initially `openai/gpt-5.6-luna`)
+
+Model IDs must use OpenRouter's `provider/model` form. Variables let maintainers change models without a code change; review repository audit-log entries and rerun affected PR checks after an update because reruns use the current values.
 
 The App token, rather than `GITHUB_TOKEN`, writes generated changesets so its commits trigger ordinary `push` and `pull_request` CI. Protect the App key from jobs that execute PR code. Create the four override labels exactly as listed above.
 

@@ -1,9 +1,16 @@
 import { z } from "zod";
 import { releaseImpactSchema, type ReleaseImpact } from "./policy.ts";
 
-const JEV_MODEL = "typesafe/jev-1.13";
+const modelIdSchema = z
+  .string()
+  .min(3)
+  .max(200)
+  .regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/);
 
-const LUNA_MODEL = "openai/gpt-5.6-luna";
+export interface ReleaseModelIds {
+  classifier: string;
+  writer: string;
+}
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -142,8 +149,15 @@ function validateInput(input: string): void {
 export function createReleaseModels(
   apiKey: string,
   fetchImpl: typeof fetch = (...args) => globalThis.fetch(...args),
+  modelIds: ReleaseModelIds = { classifier: "", writer: "" },
 ): ReleaseModels {
   if (!apiKey.trim()) throw new ReleaseModelError("credentials");
+
+  const classifierModel = modelIdSchema.safeParse(modelIds.classifier);
+  const writerModel = modelIdSchema.safeParse(modelIds.writer);
+
+  if (!classifierModel.success || !writerModel.success)
+    throw new ReleaseModelError("model-configuration");
 
   const request = async <Schema extends z.ZodType>(
     url: string,
@@ -189,7 +203,7 @@ export function createReleaseModels(
       const raw = await request(
         "https://openrouter.ai/api/alpha/decisions",
         {
-          model: JEV_MODEL,
+          model: classifierModel.data,
           state: { pull_request: input },
           questions: {
             release_impact: {
@@ -219,7 +233,7 @@ export function createReleaseModels(
       const raw = await request(
         "https://openrouter.ai/api/v1/chat/completions",
         {
-          model: LUNA_MODEL,
+          model: writerModel.data,
           temperature: 0,
           max_tokens: 300,
           messages: [
@@ -239,5 +253,3 @@ export function createReleaseModels(
     },
   };
 }
-
-export const RELEASE_MODEL_IDS = Object.freeze({ classifier: JEV_MODEL, writer: LUNA_MODEL });

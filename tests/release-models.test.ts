@@ -1,10 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  createReleaseModels,
-  RELEASE_MODEL_IDS,
-  ReleaseModelError,
-} from "../scripts/release/models.ts";
+import { createReleaseModels, ReleaseModelError } from "../scripts/release/models.ts";
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -13,12 +9,17 @@ const json = (value: JsonValue) =>
 
 const signal = () => new AbortController().signal;
 
-test("Jev classification uses the pinned release rubric and validates its choice", async () => {
-  const models = createReleaseModels("secret", async (url, init) => {
+const modelIds = { classifier: "typesafe/jev-current", writer: "openai/luna-current" };
+
+const create = (apiKey: string, fetchImpl?: typeof fetch) =>
+  createReleaseModels(apiKey, fetchImpl, modelIds);
+
+test("Jev classification uses the configured release rubric and validates its choice", async () => {
+  const models = create("secret", async (url, init) => {
     assert.equal(url, "https://openrouter.ai/api/alpha/decisions");
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer secret");
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.model, RELEASE_MODEL_IDS.classifier);
+    assert.equal(body.model, modelIds.classifier);
     assert.deepEqual(Object.keys(body.questions.release_impact.criteria), [
       "none",
       "patch",
@@ -33,11 +34,11 @@ test("Jev classification uses the pinned release rubric and validates its choice
   assert.equal(await models.classify('{"title":"untrusted"}', signal()), "minor");
 });
 
-test("Luna receives untrusted input as user data and returns prose only", async () => {
-  const models = createReleaseModels("secret", async (url, init) => {
+test("the writer receives untrusted input as user data and returns prose only", async () => {
+  const models = create("secret", async (url, init) => {
     assert.equal(url, "https://openrouter.ai/api/v1/chat/completions");
     const body = JSON.parse(String(init?.body));
-    assert.equal(body.model, RELEASE_MODEL_IDS.writer);
+    assert.equal(body.model, modelIds.writer);
     assert.match(body.messages[0].content, /untrusted data/);
     assert.deepEqual(JSON.parse(body.messages[1].content), {
       impact: "major",
@@ -54,22 +55,23 @@ test("Luna receives untrusted input as user data and returns prose only", async 
 });
 
 test("malformed, oversized, failed, timed-out, and missing-credential calls fail closed", async () => {
-  assert.throws(() => createReleaseModels(" "), ReleaseModelError);
+  assert.throws(() => create(" "), ReleaseModelError);
+  assert.throws(
+    () => createReleaseModels("secret", undefined, { classifier: "", writer: "bad value" }),
+    /model-configuration/,
+  );
   await assert.rejects(
-    createReleaseModels("secret", async () => json({ choice: "none" })).classify("input", signal()),
+    create("secret", async () => json({ choice: "none" })).classify("input", signal()),
     /invalid-response/,
   );
   await assert.rejects(
-    createReleaseModels("secret", async () => new Response("x".repeat(65_537))).classify(
-      "input",
-      signal(),
-    ),
+    create("secret", async () => new Response("x".repeat(65_537))).classify("input", signal()),
     /invalid-response/,
   );
   let transientCalls = 0;
 
   await assert.rejects(
-    createReleaseModels("secret", async () => {
+    create("secret", async () => {
       transientCalls++;
 
       return new Response("no", { status: 429 });
@@ -80,7 +82,7 @@ test("malformed, oversized, failed, timed-out, and missing-credential calls fail
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(
-    createReleaseModels("secret", async () => assert.fail("unexpected fetch")).classify(
+    create("secret", async () => assert.fail("unexpected fetch")).classify(
       "input",
       controller.signal,
     ),

@@ -19,10 +19,7 @@ const packageJson = z
 test("privileged workflow runs trusted base code and rejects forks before secret-bearing steps", () => {
   assert.match(workflow, /pull_request_target:/);
   assert.match(workflow, /reject-fork:/);
-  assert.match(
-    workflow,
-    /head\.repo\.id != github\.event\.pull_request\.base\.repo\.id/,
-  );
+  assert.match(workflow, /head\.repo\.id != github\.event\.pull_request\.base\.repo\.id/);
   assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.doesNotMatch(workflow, /pull_request\.head\.sha/);
   assert.match(workflow, /permissions: \{\}/);
@@ -36,6 +33,8 @@ test("workflow uses scoped App and OpenRouter credentials without executing PR c
   assert.match(workflow, /permission-contents: write/);
   assert.match(workflow, /permission-checks: write/);
   assert.match(workflow, /OPENROUTER_API_KEY: \$\{\{ secrets\.OPENROUTER_API_KEY \}\}/);
+  assert.match(workflow, /RELEASE_CLASSIFIER_MODEL: \$\{\{ vars\.RELEASE_CLASSIFIER_MODEL \}\}/);
+  assert.match(workflow, /RELEASE_WRITER_MODEL: \$\{\{ vars\.RELEASE_WRITER_MODEL \}\}/);
   assert.doesNotMatch(workflow, /uses: actions\/[^@]+@v\d/);
   assert.match(workflow, /npm ci --ignore-scripts/);
   assert.match(workflow, /\.\/node_modules\/\.bin\/tsx scripts\/release\/pr\.ts/);
