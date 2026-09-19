@@ -1,4 +1,4 @@
-name: Deploy GitHub infrastructure
+name: Configure Github
 
 on:
   push:
