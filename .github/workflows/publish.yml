@@ -84,7 +84,15 @@ jobs:
         run: |
           mkdir artifacts
           npm pack --ignore-scripts --json --pack-destination artifacts > artifacts/pack.json
-          echo "tarball=$(jq -r '.[0].filename' artifacts/pack.json)" >> "$GITHUB_OUTPUT"
+          tarball=$(jq -er '
+            (if type == "array" and length == 1 then .[0]
+             elif type == "object" then .["pi-typesafe-router"]
+             else error("unexpected npm pack output") end)
+            | .filename
+            | select(type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*\\.tgz$"))
+          ' artifacts/pack.json)
+          test -f "artifacts/$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
       - name: Smoke-test publish tarball
         env:
           PACKAGE_TARBALL: ${{ github.workspace }}/artifacts/${{ steps.pack.outputs.tarball }}
