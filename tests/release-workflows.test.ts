@@ -35,7 +35,7 @@ test("workflow uses scoped App and OpenRouter credentials without executing PR c
     workflow,
     /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3\.2\.0/,
   );
-  assert.match(workflow, /client-id: \$\{\{ secrets\.RELEASE_APP_CLIENT_ID \}\}/);
+  assert.match(workflow, /client-id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}/);
   assert.doesNotMatch(workflow, /app-id:/);
   assert.doesNotMatch(workflow, /cache: npm/);
   assert.match(workflow, /permission-contents: write/);
@@ -60,7 +60,7 @@ test("release preparation is manual, version-only, serialized, and App-authored"
   assert.match(prepareWorkflow, /group: release/);
   assert.match(prepareWorkflow, /cancel-in-progress: false/);
   assert.match(prepareWorkflow, /candidate\.ts preflight/);
-  assert.match(prepareWorkflow, /client-id: \$\{\{ secrets\.RELEASE_APP_CLIENT_ID \}\}/);
+  assert.match(prepareWorkflow, /client-id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}/);
   assert.doesNotMatch(prepareWorkflow, /app-id:|cache: npm/);
   assert.match(prepareWorkflow, /steps\.preflight\.outputs\.pending == 'true'/);
   assert.match(prepareWorkflow, /changesets\/action@06245a4e0a36c064a573d4150030f5ec548e4fcc/);
