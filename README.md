@@ -65,6 +65,10 @@ To use one:
 
 Run `npm run check` for offline tests, lint, formatting, and typechecking.
 
+`npm install` also installs the Lefthook pre-commit hook. Each commit formats and lints its
+staged files, applying safe fixes before the commit is created. CI runs the same formatting and
+lint checks as a required job in parallel with the test matrix.
+
 E2E tests require the following variables to be set:
 
 - `OPENROUTER_API_KEY`

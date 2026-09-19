@@ -1,0 +1,10 @@
+pre-commit:
+  jobs:
+    - name: format staged files
+      glob: "*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,json,jsonc,yaml,yml,md,mdx,css,scss,less,html,vue,svelte,astro}"
+      run: npx --no-install oxfmt --write {staged_files}
+      stage_fixed: true
+    - name: lint staged files
+      glob: "*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"
+      run: npx --no-install oxlint --fix --deny-warnings {staged_files}
+      stage_fixed: true
