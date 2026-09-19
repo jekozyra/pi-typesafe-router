@@ -34,6 +34,12 @@ jobs:
           permission-contents: write
           permission-metadata: read
           permission-pull-requests: write
+      - name: Configure release commit identity
+        env:
+          GITHUB_APP_BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+        run: |
+          git config user.name "$GITHUB_APP_BOT_LOGIN"
+          git config user.email "$GITHUB_APP_BOT_LOGIN@users.noreply.github.com"
       - name: Require the previous release to be complete
         id: preflight
         env:

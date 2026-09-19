@@ -70,6 +70,11 @@ test("release preparation is manual, version-only, serialized, and App-authored"
   assert.match(prepareWorkflow, /steps\.preflight\.outputs\.pending == 'true'/);
   assert.match(prepareWorkflow, /changesets\/action@06245a4e0a36c064a573d4150030f5ec548e4fcc/);
   assert.match(prepareWorkflow, /version: npm run release:version/);
+  assert.match(prepareWorkflow, /git config user\.name "\$GITHUB_APP_BOT_LOGIN"/);
+  assert.match(
+    prepareWorkflow,
+    /git config user\.email "\$GITHUB_APP_BOT_LOGIN@users\.noreply\.github\.com"/,
+  );
   assert.doesNotMatch(prepareWorkflow, /publish:/);
   assert.doesNotMatch(prepareWorkflow, /id-token: write/);
 });
