@@ -4,3 +4,5 @@ runtime:
   options:
     typescript: true
 description: GitHub repository settings and main branch governance for pi-typesafe-router
+backend:
+  url: gs://tinydog-pulumi-state/pi-typesafe-router

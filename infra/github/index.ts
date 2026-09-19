@@ -3,6 +3,8 @@ import * as pulumi from "@pulumi/pulumi";
 
 const config = new pulumi.Config();
 const repositoryName = config.require("repository");
+const deploymentReviewer = config.require("deploymentReviewer");
+const deploymentReviewerUser = github.getUserOutput({ username: deploymentReviewer });
 
 const repository = new github.Repository(
   "repository",
@@ -47,6 +49,24 @@ const repository = new github.Repository(
   },
 );
 
+const deploymentEnvironment = new github.RepositoryEnvironment(
+  "deployment",
+  {
+    repository: repository.name,
+    environment: "github-infrastructure",
+    canAdminsBypass: false,
+    preventSelfReview: false,
+    reviewers: [{ users: [deploymentReviewerUser.id.apply(Number)] }],
+    deploymentBranchPolicy: {
+      protectedBranches: true,
+      customBranchPolicies: false,
+    },
+  },
+  {
+    protect: true,
+  },
+);
+
 const mainRuleset = new github.RepositoryRuleset(
   "main",
   {
@@ -87,4 +107,6 @@ const mainRuleset = new github.RepositoryRuleset(
 );
 
 export const repositoryUrl = repository.htmlUrl;
+export const deploymentEnvironmentName = deploymentEnvironment.environment;
+export const deploymentReviewerLogin = deploymentReviewerUser.login;
 export const mainRulesetId = mainRuleset.rulesetId;

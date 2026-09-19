@@ -1,0 +1,120 @@
+name: Deploy GitHub infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - infra/github/**
+      - "!infra/github/**/*.md"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: github-infrastructure
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    name: Pulumi preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: infra/github/.node-version
+          cache: npm
+          cache-dependency-path: infra/github/package-lock.json
+      - name: Install dependencies
+        working-directory: infra/github
+        run: npm ci --ignore-scripts
+      - name: Validate program
+        working-directory: infra/github
+        run: npm run check
+      - name: Verify approval gate
+        env:
+          GH_TOKEN: ${{ secrets.GH_ADMIN_READ_TOKEN }}
+        run: |
+          environment=$(
+            gh api "repos/${GITHUB_REPOSITORY}/environments/github-infrastructure" --jq '
+              select(.can_admins_bypass == false)
+              | select(.deployment_branch_policy.protected_branches == true)
+              | select(any(.protection_rules[]?;
+                  .type == "required_reviewers"
+                  and .prevent_self_review == false
+                  and any(.reviewers[]?;
+                    .type == "User" and .reviewer.login == "jekozyra")))
+              | .name
+            '
+          )
+          test "$environment" = "github-infrastructure"
+      - name: Preview changes
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        with:
+          command: preview
+          stack-name: production
+          work-dir: infra/github
+          refresh: true
+          plan: ${{ github.workspace }}/pulumi.plan
+          pulumi-version-file: infra/github/.pulumi.version
+          cloud-url: gs://tinydog-pulumi-state/pi-typesafe-router
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_ADMIN_READ_TOKEN }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      - name: Save reviewed plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pulumi-plan
+          path: ${{ github.workspace }}/pulumi.plan
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Pulumi up
+    needs: preview
+    runs-on: ubuntu-latest
+    environment: github-infrastructure
+    steps:
+      - name: Refuse a stale deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          test "$latest_sha" = "$GITHUB_SHA"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: infra/github/.node-version
+          cache: npm
+          cache-dependency-path: infra/github/package-lock.json
+      - name: Install dependencies
+        working-directory: infra/github
+        run: npm ci --ignore-scripts
+      - name: Download reviewed plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pulumi-plan
+          path: ${{ github.workspace }}
+      - name: Apply approved changes
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        with:
+          command: up
+          stack-name: production
+          work-dir: infra/github
+          plan: ${{ github.workspace }}/pulumi.plan
+          pulumi-version-file: infra/github/.pulumi.version
+          cloud-url: gs://tinydog-pulumi-state/pi-typesafe-router
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
