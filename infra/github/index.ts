@@ -98,9 +98,9 @@ const mainRuleset = new github.RepositoryRuleset(
       requiredLinearHistory: true,
       requiredStatusChecks: {
         requiredChecks: [
-          { context: "Checks / lint-and-format" },
-          { context: "Checks / test (22)" },
-          { context: "Checks / test (24)" },
+          { context: "lint-and-format" },
+          { context: "test (22)" },
+          { context: "test (24)" },
           { context: "release / changeset", integrationId: releaseAppIntegrationId },
         ],
         strictRequiredStatusChecksPolicy: true,
