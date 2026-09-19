@@ -17,7 +17,11 @@ const basePr = (overrides: Partial<PullRequestState> = {}): PullRequestState => 
   labels: [],
   headRepository: "jekozyra/pi-typesafe-router",
   baseRepository: "jekozyra/pi-typesafe-router",
+  baseRef: "main",
+  headRef: "feature",
+  author: "contributor",
   headSha: "head-1",
+  baseSha: "base-1",
   labelActors: {},
   ...overrides,
 });
@@ -47,7 +51,7 @@ class FakePort implements PullRequestPort {
 
     return this.permissionValue;
   }
-  async readFile() {
+  async readFile(_path: string, _ref: string) {
     this.calls.push("read");
 
     return this.content;
@@ -230,6 +234,41 @@ test("verified bot-only commits do not infer again, while human changes regenera
     signal,
   );
   assert.deepEqual(calls, ["classify", "describe:patch"]);
+});
+
+test("managed release PR validates candidate files without calling models", async () => {
+  const port = new FakePort();
+  port.files = [
+    { ...changedFile, filename: "package.json" },
+    { ...changedFile, filename: "package-lock.json" },
+    { ...changedFile, filename: "CHANGELOG.md", status: "added" },
+    { ...changedFile, filename: ".changeset/pr-1.md", status: "removed" },
+  ];
+  port.readFile = async (path, ref) => {
+    if (path === "package.json")
+      return `{"name":"pi-typesafe-router","version":"${ref === "base-1" ? "0.1.0" : "0.2.0"}"}`;
+
+    if (path === "package-lock.json")
+      return `{"version":"${ref === "base-1" ? "0.1.0" : "0.2.0"}","packages":{"":{"version":"${ref === "base-1" ? "0.1.0" : "0.2.0"}"}}}`;
+
+    if (path === "CHANGELOG.md") return "# pi-typesafe-router\n\n## 0.2.0\n";
+
+    return undefined;
+  };
+
+  const calls: string[] = [];
+
+  const result = await runPullRequestAutomation(
+    basePr({ headRef: "changeset-release/main", author: "release-bot[bot]" }),
+    port,
+    fakeModels("major", calls),
+    "release-bot[bot]",
+    signal,
+  );
+
+  assert.equal(result.source, "release-candidate");
+  assert.deepEqual(calls, []);
+  assert.match(port.checks[0].summary, /v0.2.0/);
 });
 
 test("bot attribution without an App-owned success check regenerates", async () => {

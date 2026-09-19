@@ -34,7 +34,8 @@
     "check": "npm run fmt:check && npm run lint && npm run typecheck && npm test",
     "smoke:package": "node scripts/package-smoke.mjs",
     "prepack": "npm run typecheck",
-    "changeset": "changeset"
+    "changeset": "changeset",
+    "release:version": "changeset version && npm install --package-lock-only --ignore-scripts"
   },
   "dependencies": {
     "ai": "7.0.105",

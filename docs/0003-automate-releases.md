@@ -62,14 +62,14 @@ Existing npm versions, tags, releases, ambiguous registry responses, stale candi
 
 ## Repository setup
 
-Create a GitHub App installed only on `jekozyra/pi-typesafe-router`. Grant **Contents: read/write**, **Checks: read/write**, **Pull requests: read**, and **Metadata: read**. Add these Actions secrets:
+Create a GitHub App installed only on `jekozyra/pi-typesafe-router`. Grant **Contents: read/write**, **Checks: read/write**, **Pull requests: read/write**, and **Metadata: read**. Add these Actions secrets:
 
-- `RELEASE_APP_ID`
 - `RELEASE_APP_PRIVATE_KEY`
 - `OPENROUTER_API_KEY`
 
 Add these repository Actions variables:
 
+- `RELEASE_APP_CLIENT_ID` — the App's public client ID, used to mint installation tokens
 - `RELEASE_CLASSIFIER_MODEL` — initially `typesafe/jev-1.13`
 - `RELEASE_WRITER_MODEL` — initially `openai/gpt-5.6-luna`
 

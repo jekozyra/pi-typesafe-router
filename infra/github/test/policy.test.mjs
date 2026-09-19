@@ -95,6 +95,43 @@ test("deployment workflow previews before an approved apply", async () => {
   assert.doesNotMatch(JSON.stringify(preview), /GH_ADMIN_TOKEN/);
 });
 
+test("main requires up-to-date CI and release validation", async () => {
+  const resources = [];
+  pulumi.runtime.setMocks(
+    {
+      newResource: (args) => {
+        resources.push(args);
+        return { id: `${args.name}-id`, state: args.inputs };
+      },
+      call: (args) =>
+        args.token === "github:index/getUser:getUser"
+          ? { ...args.inputs, id: "175589", login: args.inputs.username }
+          : args.inputs,
+    },
+    "pi-typesafe-router-repository",
+    "required-checks",
+    false,
+  );
+  pulumi.runtime.setAllConfig({
+    "pi-typesafe-router-repository:deploymentReviewer": "jekozyra",
+    "pi-typesafe-router-repository:releaseAppIntegrationId": "123456",
+    "pi-typesafe-router-repository:repository": "pi-typesafe-router",
+  });
+
+  const program = await import(`../index.ts?checks=${Date.now()}`);
+  await program.mainRulesetId.promise();
+  const ruleset = resources.find(
+    ({ type }) => type === "github:index/repositoryRuleset:RepositoryRuleset",
+  );
+  assert.ok(ruleset);
+  assert.equal(ruleset.inputs.rules.requiredStatusChecks.strictRequiredStatusChecksPolicy, true);
+  assert.deepEqual(ruleset.inputs.rules.requiredStatusChecks.requiredChecks, [
+    { context: "Checks / test (22)" },
+    { context: "Checks / test (24)" },
+    { context: "release / changeset", integrationId: 123456 },
+  ]);
+});
+
 test("deployment environment requires a protected-branch reviewer", async () => {
   const resources = [];
   pulumi.runtime.setMocks(
@@ -114,6 +151,7 @@ test("deployment environment requires a protected-branch reviewer", async () => 
   );
   pulumi.runtime.setAllConfig({
     "pi-typesafe-router-repository:deploymentReviewer": "jekozyra",
+    "pi-typesafe-router-repository:releaseAppIntegrationId": "123456",
     "pi-typesafe-router-repository:repository": "pi-typesafe-router",
   });
 
