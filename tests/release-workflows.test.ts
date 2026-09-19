@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { z } from "zod";
 
 const workflow = await readFile(
@@ -16,6 +16,14 @@ const prepareWorkflow = await readFile(
 const publishWorkflow = await readFile(
   new URL("../.github/workflows/publish.yml", import.meta.url),
   "utf8",
+);
+
+const workflowsDirectory = new URL("../.github/workflows/", import.meta.url);
+
+const allWorkflows = await Promise.all(
+  (await readdir(workflowsDirectory))
+    .filter((path) => path.endsWith(".yml"))
+    .map((path) => readFile(new URL(path, workflowsDirectory), "utf8")),
 );
 
 const packageJson = z
@@ -68,8 +76,13 @@ test("release preparation is manual, version-only, serialized, and App-authored"
   assert.match(prepareWorkflow, /client-id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}/);
   assert.doesNotMatch(prepareWorkflow, /app-id:|cache: npm/);
   assert.match(prepareWorkflow, /steps\.preflight\.outputs\.pending == 'true'/);
-  assert.match(prepareWorkflow, /changesets\/action@06245a4e0a36c064a573d4150030f5ec548e4fcc/);
-  assert.match(prepareWorkflow, /version: npm run release:version/);
+  assert.match(
+    prepareWorkflow,
+    /changesets\/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2\.1\.2/,
+  );
+  assert.match(prepareWorkflow, /version-script: npm run release:version/);
+  assert.match(prepareWorkflow, /github-token: \$\{\{ steps\.app-token\.outputs\.token \}\}/);
+  assert.doesNotMatch(prepareWorkflow, /setupGitUser|GITHUB_TOKEN:/);
   assert.doesNotMatch(prepareWorkflow, /publish:/);
   assert.doesNotMatch(prepareWorkflow, /id-token: write/);
 });
@@ -94,12 +107,19 @@ test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tar
   assert.match(publishWorkflow, /cancel-in-progress: false/);
 });
 
+test("workflows pin the runner image instead of following ubuntu-latest migrations", () => {
+  for (const source of allWorkflows) {
+    assert.doesNotMatch(source, /runs-on: ubuntu-latest/);
+    assert.match(source, /runs-on: ubuntu-24\.04/);
+  }
+});
+
 test("Changesets and repository metadata are configured outside the package artifact", () => {
   assert.equal(
     packageJson.repository?.url,
     "git+https://github.com/jekozyra/pi-typesafe-router.git",
   );
-  assert.ok(packageJson.devDependencies?.["@changesets/cli"]);
+  assert.equal(packageJson.devDependencies?.["@changesets/cli"], "3.0.3");
   assert.equal(packageJson.files.includes("scripts"), false);
   assert.equal(packageJson.files.includes(".github"), false);
 });

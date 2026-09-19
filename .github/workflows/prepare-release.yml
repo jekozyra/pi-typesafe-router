@@ -12,7 +12,7 @@ concurrency:
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,12 +41,10 @@ jobs:
         run: ./node_modules/.bin/tsx scripts/release/candidate.ts preflight
       - name: Create or update release pull request
         if: steps.preflight.outputs.pending == 'true'
-        uses: changesets/action@06245a4e0a36c064a573d4150030f5ec548e4fcc # v1.4.10
+        uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
-          version: npm run release:version
-          commit: "chore: release pi-typesafe-router"
-          title: "chore: release pi-typesafe-router"
-          createGithubReleases: false
-          setupGitUser: false
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          github-token: ${{ steps.app-token.outputs.token }}
+          version-script: npm run release:version
+          commit-message: "chore: release pi-typesafe-router"
+          pr-title: "chore: release pi-typesafe-router"
+          create-github-releases: false
