@@ -54,7 +54,7 @@ Do not merge `main` into a stale release branch. If `main` advances, rerun **Pre
 
 ### Publication
 
-Configure npm trusted publishing for owner `jekozyra`, repository `pi-typesafe-router`, and workflow `publish.yml`. The workflow uses a GitHub-hosted runner, Node 22.19.0, npm 12.0.2, and `id-token: write`. We do not store an npm token.
+Configure npm trusted publishing for owner `jekozyra`, repository `pi-typesafe-router`, and workflow `publish.yml`. The workflow uses a GitHub-hosted runner, Node 22.23.2, npm 12.0.2, and `id-token: write`. We do not store an npm token.
 
 When the managed release pull request merges, `publish.yml` checks out its exact merge commit and validates the release diff against its parent. It runs repository checks, packs once, smoke-tests that tarball, and publishes the same file with lifecycle scripts disabled. After npm succeeds, it creates the immutable `vX.Y.Z` tag and matching GitHub Release from the changelog. Preparation and publication share the non-cancelling `release` concurrency group.
 
@@ -93,6 +93,8 @@ Configure npm trusted publishing for the exact `publish.yml` identity and permit
 - We use a manual preparation step instead of publishing from ordinary merges. This gives maintainers one reviewable release boundary.
 - We use npm OIDC instead of a stored npm token. Offline tests cannot prove account configuration or live publication.
 - Never force-move a release tag, unpublish a version, or move `latest` backward to repair a run.
+
+If a run fails before npm publication, merge any workflow fix first, then run **Publish release** manually from `main` with the merged release PR number in `release-pr`. The workflow resolves the PR through GitHub, checks out its exact merge commit, and repeats the managed-release identity, candidate, and publication-conflict checks. It does not publish the current `main` checkout or accept an arbitrary SHA. This lets a corrected workflow recover an already-merged release without creating a new version.
 
 If npm succeeds but GitHub finalization fails, do not rerun publication blindly. Verify `npm view pi-typesafe-router@X.Y.Z dist` and confirm the source is the merged release commit. Create `vX.Y.Z` at that commit, then run:
 
