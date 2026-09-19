@@ -1,0 +1,76 @@
+name: Publish release
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'changeset-release/main' &&
+      github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          registry-url: https://registry.npmjs.org
+      - name: Install compatible npm
+        run: npm install --global npm@12.0.2
+      - run: npm ci --ignore-scripts
+      - name: Create repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+      - name: Validate merged release and conflicts
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_APP_BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+        run: ./node_modules/.bin/tsx scripts/release/publish.ts
+      - run: npm run check
+      - name: Pack once
+        id: pack
+        run: |
+          mkdir artifacts
+          npm pack --ignore-scripts --json --pack-destination artifacts > artifacts/pack.json
+          echo "tarball=$(jq -r '.[0].filename' artifacts/pack.json)" >> "$GITHUB_OUTPUT"
+      - name: Smoke-test publish tarball
+        env:
+          PACKAGE_TARBALL: ${{ github.workspace }}/artifacts/${{ steps.pack.outputs.tarball }}
+        run: node scripts/package-smoke.mjs
+      - name: Publish exact tarball with npm OIDC
+        run: npm publish "artifacts/${{ steps.pack.outputs.tarball }}" --ignore-scripts --access public --provenance --tag latest
+      - name: Create tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if ! gh release create "${{ steps.release.outputs.tag }}" \
+            --target "${{ steps.release.outputs.sha }}" \
+            --title "${{ steps.release.outputs.tag }}" \
+            --notes-file "${{ steps.release.outputs.notes }}"; then
+            echo "::error::npm publication succeeded but GitHub finalization failed. Verify npm version ${{ steps.release.outputs.version }}, then create tag ${{ steps.release.outputs.tag }} at ${{ steps.release.outputs.sha }} and its GitHub Release manually; do not rerun publication blindly."
+            exit 1
+          fi

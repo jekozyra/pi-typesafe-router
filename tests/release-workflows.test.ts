@@ -13,6 +13,11 @@ const prepareWorkflow = await readFile(
   "utf8",
 );
 
+const publishWorkflow = await readFile(
+  new URL("../.github/workflows/publish.yml", import.meta.url),
+  "utf8",
+);
+
 const packageJson = z
   .object({
     files: z.array(z.string()),
@@ -69,7 +74,27 @@ test("release preparation is manual, version-only, serialized, and App-authored"
   assert.doesNotMatch(prepareWorkflow, /id-token: write/);
 });
 
-test("Changesets and repository metadata are configured while automation stays unpublished", () => {
+test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tarball", () => {
+  assert.match(publishWorkflow, /types: \[closed\]/);
+  assert.match(publishWorkflow, /pull_request\.merged == true/);
+  assert.match(publishWorkflow, /merge_commit_sha/);
+  assert.match(publishWorkflow, /id-token: write/);
+  assert.match(publishWorkflow, /client-id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}/);
+  assert.doesNotMatch(publishWorkflow, /app-id:|cache: npm/);
+  assert.match(publishWorkflow, /npm@12\.0\.2/);
+  assert.match(publishWorkflow, /npm pack --ignore-scripts/);
+  assert.match(publishWorkflow, /PACKAGE_TARBALL:/);
+  assert.match(
+    publishWorkflow,
+    /npm publish .*--ignore-scripts --access public --provenance --tag latest/,
+  );
+  assert.match(publishWorkflow, /gh release create/);
+  assert.match(publishWorkflow, /npm publication succeeded but GitHub finalization failed/);
+  assert.match(publishWorkflow, /group: release/);
+  assert.match(publishWorkflow, /cancel-in-progress: false/);
+});
+
+test("Changesets and repository metadata are configured outside the package artifact", () => {
   assert.equal(
     packageJson.repository?.url,
     "git+https://github.com/jekozyra/pi-typesafe-router.git",
