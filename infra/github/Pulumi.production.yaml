@@ -1,0 +1,3 @@
+config:
+  github:owner: jekozyra
+  pi-typesafe-router-repository:repository: pi-typesafe-router

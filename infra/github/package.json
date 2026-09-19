@@ -1,0 +1,22 @@
+{
+  "name": "@pi-typesafe-router/github-infrastructure",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pulumi-managed GitHub repository settings for pi-typesafe-router",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pulumi/github": "6.15.0",
+    "@pulumi/pulumi": "3.263.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "ts-node": "10.9.2",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

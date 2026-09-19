@@ -60,6 +60,7 @@ To use one:
 - `src/config.ts`, `context.ts`, `routing.ts`: schema, bounded text projection, and deterministic policy.
 - `src/index.ts`, `settings.ts`: Pi lifecycle, commands, cancellation, and global settings.
 - `tests/`: synthetic transport, policy, lifecycle, and real Pi SDK tests. No paid API calls.
+- `infra/github/`: [Pulumi-managed repository settings](infra/github/README.md) and `main` ruleset.
 - `docs/`: [0001 — pre-generation routing](docs/0001-route-before-generation.md) and [0002 — doctor verification](docs/0002-verify-routing-with-doctor.md), recording implemented decisions and their tradeoffs.
 
 ## Testing
