@@ -156,9 +156,9 @@ test("main requires up-to-date CI and release validation", async () => {
   assert.ok(ruleset);
   assert.equal(ruleset.inputs.rules.requiredStatusChecks.strictRequiredStatusChecksPolicy, true);
   assert.deepEqual(ruleset.inputs.rules.requiredStatusChecks.requiredChecks, [
-    { context: "Checks / lint-and-format" },
-    { context: "Checks / test (22)" },
-    { context: "Checks / test (24)" },
+    { context: "lint-and-format" },
+    { context: "test (22)" },
+    { context: "test (24)" },
     { context: "release / changeset", integrationId: 123456 },
   ]);
 });
