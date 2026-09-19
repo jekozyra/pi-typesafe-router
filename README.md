@@ -1,8 +1,6 @@
 # pi-typesafe-router
 
-An opt-in [Pi](https://github.com/earendil-works/pi) extension that asks Jev to classify a task, then selects a generation model from your ordered mappings.
-
-Supported Jev providers are **TypeSafe, Cloudflare AI Gateway, Vercel AI Gateway, and OpenRouter**.
+Use Jev to classify requests and route them to the right model for the task.
 
 ## Setup
 
