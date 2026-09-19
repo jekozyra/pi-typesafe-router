@@ -1,4 +1,4 @@
-name: Live E2E
+name: E2E
 
 on:
   workflow_dispatch:
