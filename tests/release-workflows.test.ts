@@ -107,6 +107,40 @@ test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tar
   assert.match(publishWorkflow, /cancel-in-progress: false/);
 });
 
+test("publish runtime satisfies the pinned npm engine requirement", () => {
+  assert.match(publishWorkflow, /node-version: 22\.23\.2/);
+  assert.match(publishWorkflow, /npm install --global npm@12\.0\.2/);
+});
+
+test("manual publication resolves a merged same-repository release on main before checkout", () => {
+  assert.match(publishWorkflow, /workflow_dispatch:/);
+  assert.match(publishWorkflow, /release-pr:/);
+  assert.match(
+    publishWorkflow,
+    /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
+  );
+  assert.match(publishWorkflow, /pull-requests: read/);
+  assert.match(
+    publishWorkflow,
+    /RELEASE_PR: \$\{\{ inputs\.release-pr \|\| github\.event\.pull_request\.number \}\}/,
+  );
+  assert.match(publishWorkflow, /gh api "repos\/\$GITHUB_REPOSITORY\/pulls\/\$RELEASE_PR"/);
+  assert.match(publishWorkflow, /\.merged == true and/);
+  assert.match(publishWorkflow, /\.base\.ref == "main" and/);
+  assert.match(publishWorkflow, /\.head\.ref == "changeset-release\/main" and/);
+  assert.match(publishWorkflow, /\.base\.repo\.full_name == \$repo and/);
+  assert.match(publishWorkflow, /\.head\.repo\.full_name == \$repo and/);
+  assert.match(publishWorkflow, /ref: \$\{\{ steps\.target\.outputs\.sha \}\}/);
+  assert.match(publishWorkflow, /cp "\$RUNNER_TEMP\/release-event\.json" "\$GITHUB_EVENT_PATH"/);
+  assert.ok(
+    publishWorkflow.indexOf("Resolve merged release PR") <
+      publishWorkflow.indexOf("actions/checkout@"),
+  );
+  assert.ok(
+    publishWorkflow.indexOf("scripts/release/publish.ts") < publishWorkflow.indexOf("npm publish"),
+  );
+});
+
 test("workflows pin the runner image instead of following ubuntu-latest migrations", () => {
   for (const source of allWorkflows) {
     assert.doesNotMatch(source, /runs-on: ubuntu-latest/);
