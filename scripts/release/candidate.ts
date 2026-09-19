@@ -144,7 +144,13 @@ export async function validatePriorPublication(
     }),
   ]);
 
-  if (!npm.ok || !tag.ok || !release.ok) throw new Error("prior-release-is-incomplete");
+  const artifacts = [npm, tag, release];
+
+  if (artifacts.every((response) => response.ok)) return;
+
+  if (version === "0.1.0" && artifacts.every((response) => response.status === 404)) return;
+
+  throw new Error("prior-release-is-incomplete");
 }
 
 async function main(): Promise<void> {

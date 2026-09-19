@@ -48,7 +48,7 @@ Overrides do not call OpenRouter. Conflicting labels, unauthorized actors, and m
 
 ### Release preparation
 
-Run **Prepare release** manually from `main`. The workflow first requires the current version to exist on npm with a matching `vX.Y.Z` tag and GitHub Release. It then uses Changesets in version-only mode to consume pending Changesets, update `package.json`, `package-lock.json`, and `CHANGELOG.md`, and create or refresh `changeset-release/main`. With no pending Changesets, it does nothing.
+Run **Prepare release** manually from `main`. The workflow first requires the current version to exist on npm with a matching `vX.Y.Z` tag and GitHub Release. For the initial `0.1.0` bootstrap only, it also accepts all three artifacts being absent; partial or ambiguous states still fail closed. It then uses Changesets in version-only mode to consume pending Changesets, update `package.json`, `package-lock.json`, and `CHANGELOG.md`, and create or refresh `changeset-release/main`. With no pending Changesets, it does nothing.
 
 Do not merge `main` into a stale release branch. If `main` advances, rerun **Prepare release**, wait for strict up-to-date checks, and review the candidate again. Validation rejects unrelated files, unconsumed Changesets, version or lockfile drift, malformed changelogs, forged identity, and versions at or above `1.0.0`.
 
