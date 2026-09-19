@@ -63,7 +63,7 @@ jobs:
           refresh: true
           plan: ${{ github.workspace }}/pulumi.plan
           pulumi-version-file: infra/github/.pulumi.version
-          cloud-url: gs://tinydog-terraform-state/pi-typesafe-router
+          cloud-url: gs://tinydog-pulumi-state/pi-typesafe-router
         env:
           GITHUB_TOKEN: ${{ secrets.GH_ADMIN_READ_TOKEN }}
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
@@ -114,7 +114,7 @@ jobs:
           work-dir: infra/github
           plan: ${{ github.workspace }}/pulumi.plan
           pulumi-version-file: infra/github/.pulumi.version
-          cloud-url: gs://tinydog-terraform-state/pi-typesafe-router
+          cloud-url: gs://tinydog-pulumi-state/pi-typesafe-router
         env:
           GITHUB_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}

@@ -19,7 +19,7 @@ The repository resource intentionally ignores product metadata such as its descr
 ## Prerequisites
 
 1. Install the Node.js version in `.node-version` or newer and the Pulumi CLI version in `.pulumi.version`.
-2. Authenticate to GCP with access to `gs://tinydog-terraform-state/pi-typesafe-router`.
+2. Authenticate to GCP with access to `gs://tinydog-pulumi-state/pi-typesafe-router`.
 3. In `tinydog-infra`, provision a dedicated service account with object access to that state path and a Workload Identity Federation binding restricted to `jekozyra/pi-typesafe-router`.
 4. Create fine-grained GitHub personal access tokens restricted to this repository. The preview token needs **Administration: read** and **Environments: read**; the deployment token needs **Administration: read/write** and **Environments: read/write**. Do not expose them until dependencies are installed.
 
@@ -33,7 +33,7 @@ Import the existing repository and ruleset into a new stack once:
 cd infra/github
 npm ci --ignore-scripts
 gcloud auth application-default login
-pulumi login gs://tinydog-terraform-state/pi-typesafe-router
+pulumi login gs://tinydog-pulumi-state/pi-typesafe-router
 read -rsp "Pulumi state passphrase: " PULUMI_CONFIG_PASSPHRASE && echo
 export PULUMI_CONFIG_PASSPHRASE
 pulumi stack init production --secrets-provider passphrase # omit if the stack already exists
@@ -47,7 +47,7 @@ pulumi up --refresh
 unset GITHUB_TOKEN PULUMI_CONFIG_PASSPHRASE
 ```
 
-The imports adopt resources without changing them. Review the first preview carefully; it must not replace any resource. The subsequent update records resource protection and reconciles only the managed policy. State is stored under the dedicated prefix in the `tinydog-terraform-state` bucket, never in this repository.
+The imports adopt resources without changing them. Review the first preview carefully; it must not replace any resource. The subsequent update records resource protection and reconciles only the managed policy. State is stored under the dedicated prefix in the `tinydog-pulumi-state` bucket, never in this repository.
 
 The ruleset and environment import IDs are deliberately absent from the steady-state program. When recovering lost state, obtain their current IDs from GitHub and repeat the imports. The repository keeps an inline `import` guard so a lost remote or state cannot cause Pulumi to create an empty replacement. Remove that guard only as an explicit break-glass step when intentionally recreating the repository.
 
@@ -94,7 +94,7 @@ The repository maintainer must run a credentialed drift check at least monthly a
 cd infra/github
 npm ci --ignore-scripts
 gcloud auth application-default login
-pulumi login gs://tinydog-terraform-state/pi-typesafe-router
+pulumi login gs://tinydog-pulumi-state/pi-typesafe-router
 pulumi stack select production
 read -rsp "Pulumi state passphrase: " PULUMI_CONFIG_PASSPHRASE && echo
 read -rsp "GitHub token: " GITHUB_TOKEN && echo
