@@ -14,6 +14,7 @@ const infraUrl = new URL("../", import.meta.url);
 test("deployment workflow previews before an approved apply", async () => {
   const workflow = parse(await readFile(workflowPath, "utf8"));
   const packageJson = JSON.parse(await readFile(new URL("package.json", infraUrl), "utf8"));
+  const project = parse(await readFile(new URL("Pulumi.yaml", infraUrl), "utf8"));
   const stack = parse(await readFile(new URL("Pulumi.production.yaml", infraUrl), "utf8"));
   const reviewer = stack.config["pi-typesafe-router-repository:deploymentReviewer"];
   const nodeVersion = (await readFile(new URL(".node-version", infraUrl), "utf8")).trim();
@@ -24,6 +25,7 @@ test("deployment workflow previews before an approved apply", async () => {
   assert.deepEqual(Object.keys(workflow.on), ["push"]);
   assert.deepEqual(workflow.on.push.branches, ["main"]);
   assert.deepEqual(workflow.on.push.paths, ["infra/github/**", "!infra/github/**/*.md"]);
+  assert.deepEqual(workflow.permissions, { contents: "read", "id-token": "write" });
   assert.deepEqual(workflow.concurrency, {
     group: "github-infrastructure",
     "cancel-in-progress": false,
@@ -47,6 +49,12 @@ test("deployment workflow previews before an approved apply", async () => {
   for (const job of [preview, deploy]) {
     const setupNode = job.steps.find(({ uses }) => uses?.startsWith("actions/setup-node@"));
     assert.equal(setupNode.with["node-version-file"], "infra/github/.node-version");
+    const auth = job.steps.find(({ name }) => name === "Authenticate to Google Cloud");
+    assert.equal(
+      auth.with.workload_identity_provider,
+      "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}",
+    );
+    assert.equal(auth.with.service_account, "${{ vars.GCP_SERVICE_ACCOUNT }}");
   }
 
   const pulumiAction = "pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d";
@@ -54,12 +62,23 @@ test("deployment workflow previews before an approved apply", async () => {
   const deployPulumi = deploy.steps.find(({ uses }) => uses === pulumiAction);
   assert.equal(previewPulumi.with["pulumi-version-file"], "infra/github/.pulumi.version");
   assert.equal(deployPulumi.with["pulumi-version-file"], "infra/github/.pulumi.version");
+  assert.equal(previewPulumi.with["cloud-url"], project.backend.url);
+  assert.equal(deployPulumi.with["cloud-url"], project.backend.url);
   assert.equal(previewPulumi.with.command, "preview");
   assert.equal(previewPulumi.with.refresh, true);
   assert.equal(previewPulumi.env.GITHUB_TOKEN, "${{ secrets.GH_ADMIN_READ_TOKEN }}");
   assert.equal(deployPulumi.with.command, "up");
   assert.equal(deployPulumi.with.refresh, undefined);
   assert.equal(deployPulumi.env.GITHUB_TOKEN, "${{ secrets.GH_ADMIN_TOKEN }}");
+  assert.equal(
+    previewPulumi.env.PULUMI_CONFIG_PASSPHRASE,
+    "${{ secrets.PULUMI_CONFIG_PASSPHRASE }}",
+  );
+  assert.equal(
+    deployPulumi.env.PULUMI_CONFIG_PASSPHRASE,
+    "${{ secrets.PULUMI_CONFIG_PASSPHRASE }}",
+  );
+  assert.doesNotMatch(JSON.stringify(workflow), /PULUMI_ACCESS_TOKEN/);
   assert.equal(previewPulumi.with.plan, "${{ github.workspace }}/pulumi.plan");
   assert.equal(deployPulumi.with.plan, previewPulumi.with.plan);
   for (const step of [...preview.steps, ...deploy.steps]) {

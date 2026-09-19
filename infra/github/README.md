@@ -19,8 +19,9 @@ The repository resource intentionally ignores product metadata such as its descr
 ## Prerequisites
 
 1. Install the Node.js version in `.node-version` or newer and the Pulumi CLI version in `.pulumi.version`.
-2. Create and log in to a durable Pulumi Cloud backend.
-3. Create fine-grained GitHub personal access tokens restricted to this repository. The preview token needs **Administration: read** and **Environments: read**; the deployment token needs **Administration: read/write** and **Environments: read/write**. Do not expose them until dependencies are installed.
+2. Authenticate to GCP with access to `gs://tinydog-terraform-state/pi-typesafe-router`.
+3. In `tinydog-infra`, provision a dedicated service account with object access to that state path and a Workload Identity Federation binding restricted to `jekozyra/pi-typesafe-router`.
+4. Create fine-grained GitHub personal access tokens restricted to this repository. The preview token needs **Administration: read** and **Environments: read**; the deployment token needs **Administration: read/write** and **Environments: read/write**. Do not expose them until dependencies are installed.
 
 Never commit the token, put it in a stack YAML file, or pass it on a command line where shell history may retain it.
 
@@ -31,7 +32,11 @@ Import the existing repository and ruleset into a new stack once:
 ```sh
 cd infra/github
 npm ci --ignore-scripts
-pulumi stack init production # omit if the stack already exists
+gcloud auth application-default login
+pulumi login gs://tinydog-terraform-state/pi-typesafe-router
+read -rsp "Pulumi state passphrase: " PULUMI_CONFIG_PASSPHRASE && echo
+export PULUMI_CONFIG_PASSPHRASE
+pulumi stack init production --secrets-provider passphrase # omit if the stack already exists
 read -rsp "GitHub token: " GITHUB_TOKEN && echo
 export GITHUB_TOKEN
 pulumi import github:index/repository:Repository repository pi-typesafe-router
@@ -39,10 +44,10 @@ pulumi import github:index/repositoryEnvironment:RepositoryEnvironment deploymen
 pulumi import github:index/repositoryRuleset:RepositoryRuleset main pi-typesafe-router:23683409
 pulumi preview --refresh
 pulumi up --refresh
-unset GITHUB_TOKEN
+unset GITHUB_TOKEN PULUMI_CONFIG_PASSPHRASE
 ```
 
-The imports adopt resources without changing them. Review the first preview carefully; it must not replace any resource. The subsequent update records resource protection and reconciles only the managed policy. Store Pulumi state in Pulumi Cloud, never in this repository.
+The imports adopt resources without changing them. Review the first preview carefully; it must not replace any resource. The subsequent update records resource protection and reconciles only the managed policy. State is stored under the dedicated prefix in the `tinydog-terraform-state` bucket, never in this repository.
 
 The ruleset and environment import IDs are deliberately absent from the steady-state program. When recovering lost state, obtain their current IDs from GitHub and repeat the imports. The repository keeps an inline `import` guard so a lost remote or state cannot cause Pulumi to create an empty replacement. Remove that guard only as an explicit break-glass step when intentionally recreating the repository.
 
@@ -50,15 +55,17 @@ The ruleset and environment import IDs are deliberately absent from the steady-s
 
 The `github-infrastructure` environment requires approval from `jekozyra`, prevents administrator bypass, and accepts deployments only from protected branches. Self-approval is allowed so the repository owner can release a deployment they triggered.
 
-After bootstrapping the `production` stack, configure the preview secrets on the repository and the write token on the protected environment:
+After bootstrapping the `production` stack, configure the WIF resource names as repository variables, the preview credentials as repository secrets, and the write token on the protected environment:
 
 ```sh
-gh secret set PULUMI_ACCESS_TOKEN
+gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER --body 'projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>'
+gh variable set GCP_SERVICE_ACCOUNT --body 'pi-typesafe-router-pulumi@tinydog-infra.iam.gserviceaccount.com'
+gh secret set PULUMI_CONFIG_PASSPHRASE
 gh secret set GH_ADMIN_READ_TOKEN
 gh secret set GH_ADMIN_TOKEN --env github-infrastructure
 ```
 
-Use the Pulumi Cloud token for `PULUMI_ACCESS_TOKEN`. Use the Administration/Environments read token for `GH_ADMIN_READ_TOKEN` and the corresponding read/write token for `GH_ADMIN_TOKEN`. The preview job can read policy but cannot change it. GitHub releases the write token only after approval.
+Use the same passphrase that initialized the Pulumi stack. Use the Administration/Environments read token for `GH_ADMIN_READ_TOKEN` and the corresponding read/write token for `GH_ADMIN_TOKEN`. GCP access is keyless through WIF. The preview job can read GitHub policy but cannot change it, and GitHub releases the write token only after approval.
 
 ### Approval-gate recovery
 
@@ -86,11 +93,14 @@ The repository maintainer must run a credentialed drift check at least monthly a
 ```sh
 cd infra/github
 npm ci --ignore-scripts
+gcloud auth application-default login
+pulumi login gs://tinydog-terraform-state/pi-typesafe-router
 pulumi stack select production
+read -rsp "Pulumi state passphrase: " PULUMI_CONFIG_PASSPHRASE && echo
 read -rsp "GitHub token: " GITHUB_TOKEN && echo
-export GITHUB_TOKEN
+export PULUMI_CONFIG_PASSPHRASE GITHUB_TOKEN
 pulumi preview --refresh --expect-no-changes
-unset GITHUB_TOKEN
+unset GITHUB_TOKEN PULUMI_CONFIG_PASSPHRASE
 ```
 
 Any unexpected change requires reconciliation in Pulumi or an explicit update to this project. Keep administration credentials out of pull-request CI.
