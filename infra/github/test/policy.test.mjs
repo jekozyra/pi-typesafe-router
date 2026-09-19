@@ -22,11 +22,16 @@ test("deployment workflow previews before an approved apply", async () => {
   const project = parse(await readFile(new URL("Pulumi.yaml", infraUrl), "utf8"));
   const stack = parse(await readFile(new URL("Pulumi.production.yaml", infraUrl), "utf8"));
   const reviewer = stack.config["pi-typesafe-router-repository:deploymentReviewer"];
+
+  const releaseAppIntegrationId =
+    stack.config["pi-typesafe-router-repository:releaseAppIntegrationId"];
+
   const nodeVersion = (await readFile(new URL(".node-version", infraUrl), "utf8")).trim();
   const pulumiVersion = (await readFile(new URL(".pulumi.version", infraUrl), "utf8")).trim();
 
   assert.equal(packageJson.engines.node, `>=${nodeVersion}`);
   assert.equal(packageJson.dependencies["@pulumi/pulumi"], pulumiVersion);
+  assert.equal(releaseAppIntegrationId, 5003746);
   assert.deepEqual(Object.keys(workflow.on), ["push"]);
   assert.deepEqual(workflow.on.push.branches, ["main"]);
   assert.deepEqual(workflow.on.push.paths, ["infra/github/**", "!infra/github/**/*.md"]);

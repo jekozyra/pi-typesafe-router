@@ -1,5 +1,6 @@
 config:
   github:owner: jekozyra
   pi-typesafe-router-repository:deploymentReviewer: jekozyra
+  pi-typesafe-router-repository:releaseAppIntegrationId: 5003746
   pi-typesafe-router-repository:repository: pi-typesafe-router
 encryptionsalt: v1:/5qtJuAUXjg=:v1:KtQUR3vizJA+Ef/5:ACAsDWjMReCaX/Jm8+GpWK8rS8SXLg==
