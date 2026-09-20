@@ -46,6 +46,18 @@ const NAME = "typesafe-router";
 
 const sessionModeSchema = z.object({ mode: z.enum(["off", "auto", "shadow"]) });
 
+const verificationEntrySchema = z.discriminatedUnion("verified", [
+  z.object({ verified: z.literal(false) }).strict(),
+  z
+    .object({
+      verified: z.literal(true),
+      fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+      passed: z.array(z.string().min(1).max(1025)).max(24),
+      checkedAt: z.iso.datetime(),
+    })
+    .strict(),
+]);
+
 const DISCLOSURE =
   "Classification sends your request and bounded recent user/assistant text to the configured backend. Text can contain private code or secrets. Shadow mode also sends data and may incur charges. No automatic generation replay or classifier-backend failover.";
 
@@ -121,6 +133,47 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
           ? undefined
           : `Jev ${mode}${active ? `: ${active.phase}` : !verified ? ": doctor required" : last?.target ? `: ${targetKey(last.target)}` : ""}`,
       );
+  }
+
+  function invalidateVerification() {
+    verified = undefined;
+    pi.appendEntry(`${NAME}-verification`, { verified: false });
+  }
+
+  function persistVerification(next: VerifiedGeneration) {
+    verified = next;
+    pi.appendEntry(`${NAME}-verification`, {
+      verified: true,
+      fingerprint: next.fingerprint,
+      passed: [...next.passed],
+      checkedAt: next.checkedAt,
+    });
+  }
+
+  function restoreVerification(ctx: RouterContext) {
+    verified = undefined;
+    let persisted: z.infer<typeof verificationEntrySchema> | undefined;
+
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom" || entry.customType !== `${NAME}-verification`) continue;
+      const parsed = verificationEntrySchema.safeParse(entry.data);
+      persisted = parsed.success ? parsed.data : { verified: false };
+    }
+
+    if (!persisted?.verified || !config || configError) return;
+    const fingerprint = verificationFingerprint(config, ctx.modelRegistry);
+
+    if (persisted.fingerprint !== fingerprint) {
+      invalidateVerification();
+
+      return;
+    }
+
+    verified = {
+      fingerprint,
+      passed: new Set(persisted.passed),
+      checkedAt: persisted.checkedAt,
+    };
   }
 
   function cancel() {
@@ -238,7 +291,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
         JSON.stringify(fresh) !== JSON.stringify(cfg) ||
         verified.fingerprint !== verificationFingerprint(cfg, ctx.modelRegistry)
       ) {
-        verified = undefined;
+        invalidateVerification();
         notify(
           ctx,
           "Routing blocked: configuration, model mappings, or credential references changed. Run /typesafe-router doctor again.",
@@ -271,7 +324,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
       return true;
     } catch {
       if (isCurrent(op)) {
-        verified = undefined;
+        invalidateVerification();
         notify(
           ctx,
           "Routing blocked: configuration or verification could not be checked. Run /typesafe-router doctor.",
@@ -652,7 +705,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
   async function doctor(ctx: RouterContext) {
     const { op, cleanup } = begin(ctx, "doctor");
-    verified = undefined;
+    invalidateVerification();
     op.phase = "loading";
 
     function progress(message: string) {
@@ -803,7 +856,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
       const ready = !!result.classification && missingRoutes.length === 0 && unchanged;
 
-      if (ready) verified = { fingerprint, passed, checkedAt: new Date().toISOString() };
+      if (ready) persistVerification({ fingerprint, passed, checkedAt: new Date().toISOString() });
 
       const lines = [
         `pi-typesafe-router: ${ready ? "✅" : "❌"}`,
@@ -860,13 +913,13 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     if (!(await reload(ctx))) return;
 
     for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type === "custom" && entry.customType === `${NAME}-mode`) {
-        const parsed = sessionModeSchema.safeParse(entry.data);
+      if (entry.type !== "custom" || entry.customType !== `${NAME}-mode`) continue;
+      const parsed = sessionModeSchema.safeParse(entry.data);
 
-        if (parsed.success && config && !configError) mode = parsed.data.mode;
-      }
+      if (parsed.success && config && !configError) mode = parsed.data.mode;
     }
 
+    restoreVerification(ctx);
     status(ctx);
   });
   pi.on("session_shutdown", async () => {
@@ -898,6 +951,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   pi.on("session_before_fork", beforeNavigation);
   pi.on("session_before_tree", beforeNavigation);
   pi.on("session_tree", (_event, ctx) => {
+    restoreVerification(ctx);
     setMode("off", ctx);
     last = undefined;
     generationFailed = false;

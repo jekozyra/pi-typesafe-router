@@ -33,7 +33,7 @@ Verify your configuration, then enable routing:
 
 Doctor tests the classifier and configured models with synthetic requests, without sending your conversation, using tools, or changing the selected model. These checks may incur charges.
 
-Run `/typesafe-router help` for a table explaining every command.
+Run `/typesafe-router help` for a table explaining every command. Successful doctor verification is stored in the current Pi session and restored after `/reload` when the configuration, models, and credential references still match.
 
 ## Configuration
 
