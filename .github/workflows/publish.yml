@@ -69,6 +69,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
+          permission-workflows: write
           permission-metadata: read
       - name: Validate merged release and conflicts
         id: release
