@@ -85,6 +85,7 @@ const schema = z
     version: z.literal(1).default(1),
     mode: z.enum(["off", "shadow", "auto"]).default("off"),
     allowHeadless: z.boolean().default(false),
+    showFooterStatus: z.boolean().default(true),
     backend: backend.default({
       type: "typesafe",
       model: "jev-1.13.0",

@@ -44,6 +44,7 @@ export interface RouterConfig {
   version: 1;
   mode: Mode;
   allowHeadless: boolean;
+  showFooterStatus: boolean;
   backend: Backend;
   timeoutMs: number;
   generationProbeTimeoutMs: number;

@@ -128,6 +128,12 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   function status(ctx: RouterContext) {
     if (!ctx.hasUI) return;
 
+    if (config?.showFooterStatus === false) {
+      ctx.ui.setStatus(NAME, undefined);
+
+      return;
+    }
+
     const label = mode === "auto" ? "on" : mode;
 
     const detail = active
@@ -292,11 +298,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
       if (!isCurrent(op)) return false;
 
-      if (
-        !fresh ||
-        JSON.stringify(fresh) !== JSON.stringify(cfg) ||
-        verified.fingerprint !== verificationFingerprint(cfg, ctx.modelRegistry)
-      ) {
+      if (!fresh || verified.fingerprint !== verificationFingerprint(fresh, ctx.modelRegistry)) {
         invalidateVerification();
         notify(
           ctx,

@@ -380,6 +380,15 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       assert.deepEqual(h.statuses.at(-1), ["typesafe-router", `router: ${label}`]);
     });
 
+  it("allows the footer status to be disabled in configuration", async () => {
+    const h = await harness({
+      unverified: true,
+      config: config({ mode: "auto", showFooterStatus: false }),
+    });
+
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", undefined]);
+  });
+
   it("off does not classify or select", async () => {
     const h = await harness({ config: config({ mode: "off" }) });
     assert.deepEqual(await h.input(), { action: "continue" });
@@ -1324,7 +1333,7 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
     assert.equal(h.classifications.length, 1);
 
     await h.emit("session_start", { reason: "reload" });
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto"]);
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: on"]);
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 2);
     assert.deepEqual(h.selections, ["quick"]);
@@ -1347,7 +1356,7 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
     await h.command("doctor");
     await h.emit("session_start", { reason: "reload" });
 
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto: doctor required"]);
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: on · doctor required"]);
     assert.deepEqual(await h.input(), { action: "handled" });
     assert.deepEqual(h.selections, []);
   });
@@ -1595,6 +1604,21 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
       assert.match(h.notifications.at(-1)!, /doctor/i);
       assert.ok(!JSON.stringify(h.entries).includes("CHANGED_KEY_REFERENCE"));
     });
+
+  it("does not invalidate routing proof for a footer-only disk change", async () => {
+    let disk = config();
+    const h = await harness({ load: async () => disk });
+    disk = config({ showFooterStatus: false });
+
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
+    assert.equal(
+      h.entries.some(
+        (entry) => entry.type === "typesafe-router-verification" && entry.data.verified === false,
+      ),
+      false,
+    );
+  });
 
   it("on rechecks disk before enabling a previously verified off session", async () => {
     let disk = config({ mode: "off" });

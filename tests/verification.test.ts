@@ -85,6 +85,17 @@ function assertOpaque(fingerprint: string) {
 }
 
 describe("verification against the actual Pi runtime", { concurrency: false }, () => {
+  it("does not invalidate routing proof when only footer visibility changes", async (t) => {
+    const { registry } = await fixture(t);
+    registry.registerProvider(target.provider, providerConfig());
+    registry.registerProvider(classifier, providerConfig());
+    const hidden = { ...config, showFooterStatus: false };
+    assert.equal(
+      verificationFingerprint(hidden, registry),
+      verificationFingerprint(config, registry),
+    );
+  });
+
   for (const changed of ["credential", "header"] as const) {
     it(`invalidates a models.json ${changed} change with identical model and auth status`, async (t) => {
       const initial = { ...providerConfig(), headers: { "X-Fixture": "fake-header-first" } };
