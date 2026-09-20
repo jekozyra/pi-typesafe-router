@@ -7,26 +7,58 @@ on:
         description: Merged release PR number to retry before npm publication
         required: true
         type: string
-  pull_request_target:
-    types: [closed]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
   pull-requests: read
-  id-token: write
-
-concurrency:
-  group: release
-  cancel-in-progress: false
 
 jobs:
+  resolve:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - name: Identify release merge
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ inputs.release-pr }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$RELEASE_PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+          else
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls?per_page=100" > "$RUNNER_TEMP/associated-prs.json"
+            candidates=$(jq -c --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" '
+              [ .[][] | select(
+                .merged_at != null and .merge_commit_sha == $sha and
+                .base.ref == "main" and .head.ref == "changeset-release/main" and
+                .base.repo.full_name == $repo and .head.repo.full_name == $repo
+              ) ]
+            ' "$RUNNER_TEMP/associated-prs.json")
+            count=$(jq length <<< "$candidates")
+            if [ "$count" = 0 ]; then
+              echo "No managed release merged at $GITHUB_SHA; skipping publication."
+              exit 0
+            fi
+            [ "$count" = 1 ] || { echo "::error::Ambiguous release merge"; exit 1; }
+            RELEASE_PR=$(jq -er '.[0].number' <<< "$candidates")
+          fi
+          echo "Selected release PR #$RELEASE_PR for $GITHUB_EVENT_NAME on $GITHUB_REF"
+          echo "pr=$RELEASE_PR" >> "$GITHUB_OUTPUT"
   publish:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event.pull_request.merged == true &&
-       github.event.pull_request.base.ref == 'main' &&
-       github.event.pull_request.head.ref == 'changeset-release/main' &&
-       github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name)
+    needs: resolve
+    if: needs.resolve.outputs.pr != ''
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -34,7 +66,7 @@ jobs:
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PR: ${{ inputs.release-pr || github.event.pull_request.number }}
+          RELEASE_PR: ${{ needs.resolve.outputs.pr }}
         run: |
           [[ "$RELEASE_PR" =~ ^[1-9][0-9]*$ ]] || exit 1
           gh api "repos/$GITHUB_REPOSITORY/pulls/$RELEASE_PR" > "$RUNNER_TEMP/release-pr.json"
@@ -46,6 +78,9 @@ jobs:
             .head.repo.full_name == $repo and
             (.merge_commit_sha | test("^[0-9a-f]{40}$"))
           ' "$RUNNER_TEMP/release-pr.json"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            test "$(jq -r .merge_commit_sha "$RUNNER_TEMP/release-pr.json")" = "$GITHUB_SHA"
+          fi
           jq '{pull_request: .}' "$RUNNER_TEMP/release-pr.json" > "$RUNNER_TEMP/release-event.json"
           echo "sha=$(jq -r .merge_commit_sha "$RUNNER_TEMP/release-pr.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,8 +133,60 @@ jobs:
         env:
           PACKAGE_TARBALL: ${{ github.workspace }}/artifacts/${{ steps.pack.outputs.tarball }}
         run: node scripts/package-smoke.mjs
+      - name: Diagnose publishing identity
+        run: |
+          node --version
+          npm --version
+          node --input-type=module <<'NODE'
+          const keys = ["GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW_REF"];
+          console.log("Workflow context:", JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));
+          console.log("Token environment presence:", JSON.stringify({
+            NODE_AUTH_TOKEN: Boolean(process.env.NODE_AUTH_TOKEN),
+            NPM_TOKEN: Boolean(process.env.NPM_TOKEN),
+            oidcAvailable: Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN),
+          }));
+          const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+          url.searchParams.set("audience", "npm:registry.npmjs.org");
+          const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+            signal: AbortSignal.timeout(30_000),
+          }).catch(() => { throw new Error("OIDC diagnostic request failed; details suppressed to protect credentials"); });
+          console.log("GitHub OIDC request status:", response.status);
+          if (!response.ok) process.exit(1);
+          let claims;
+          try {
+            const { value } = await response.json();
+            claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url").toString());
+          } catch {
+            throw new Error("Unable to parse OIDC diagnostic claims; details suppressed to protect credentials");
+          }
+          const allowed = ["iss", "aud", "sub", "repository", "repository_id", "repository_owner_id", "repository_visibility", "ref", "sha", "event_name", "workflow_ref", "job_workflow_ref", "runner_environment", "environment"];
+          console.log("OIDC identity claims (diagnostic only):", JSON.stringify(Object.fromEntries(allowed.filter(key => key in claims).map(key => [key, claims[key]]))));
+          NODE
       - name: Publish exact tarball with npm OIDC
-        run: npm publish "./artifacts/${{ steps.pack.outputs.tarball }}" --ignore-scripts --access public --provenance --tag latest
+        env:
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+          NPM_CONFIG_LOGS_DIR: ${{ runner.temp }}/npm-publish-debug
+        run: |
+          trap 'rm -f "$RUNNER_TEMP/npm-publish.log"; rm -rf "$RUNNER_TEMP/npm-publish-debug"' EXIT
+          status=0
+          npm publish "./artifacts/$RELEASE_TARBALL" --ignore-scripts --access public --provenance --tag latest --loglevel=verbose > "$RUNNER_TEMP/npm-publish.log" 2>&1 || status=$?
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const log = readFileSync(`${process.env.RUNNER_TEMP}/npm-publish.log`, "utf8");
+          for (const match of log.matchAll(/npm http fetch (GET|POST|PUT) (\d{3}) https:\/\/registry\.npmjs\.org\/([^\s]*)/g)) {
+            const endpoint = match[3].startsWith("-/npm/v1/oidc/token/exchange/") ? "OIDC token exchange" : "npm registry";
+            console.log(`${endpoint}: ${match[1]} HTTP ${match[2]}`);
+          }
+          const codes = [...log.matchAll(/npm error code ([A-Z0-9_]+)/g)].map(match => match[1]);
+          console.log("npm error codes:", codes.join(", ") || "none");
+          console.log("Raw npm debug output withheld to protect credentials.");
+          NODE
+          if [ "$status" != 0 ]; then
+            echo "::error::npm publish failed. Compare the OIDC identity and exchange status above with the npm trusted publisher configuration. Check whether the version exists before retrying."
+            exit "$status"
+          fi
+          echo "npm publication completed for $RELEASE_TARBALL"
       - name: Create tag and GitHub Release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
