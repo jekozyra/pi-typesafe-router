@@ -1,5 +1,12 @@
 # pi-typesafe-router
 
+## 0.2.1
+
+### Patch Changes
+
+- 2f31bbc: Release metadata files can now be up to 1 MiB without triggering the generated changeset size limit, while oversized files are rejected with clearer errors and their response bodies are cancelled.
+- e611624: Preserve lockfile dependency metadata during release versioning by updating only the package version fields instead of regenerating the lockfile.
+
 ## 0.2.0
 
 ### Minor Changes
