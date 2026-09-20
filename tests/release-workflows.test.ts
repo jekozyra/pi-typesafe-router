@@ -92,6 +92,7 @@ test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tar
   assert.match(publishWorkflow, /pull_request\.merged == true/);
   assert.match(publishWorkflow, /merge_commit_sha/);
   assert.match(publishWorkflow, /id-token: write/);
+  assert.match(publishWorkflow, /permission-workflows: write/);
   assert.match(publishWorkflow, /client-id: \$\{\{ vars\.RELEASE_APP_CLIENT_ID \}\}/);
   assert.doesNotMatch(publishWorkflow, /app-id:|cache: npm/);
   assert.match(publishWorkflow, /npm@12\.0\.2/);
