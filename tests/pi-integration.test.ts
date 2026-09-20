@@ -313,12 +313,15 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
     ]);
     f.generations.length = 0;
     assert.equal(f.session.messages.length, 0);
-    assert.equal(f.records().length, before);
+    const verificationRecords = f.records().slice(before);
+    assert.equal(verificationRecords.length, 1);
+    assert.equal(verificationRecords[0]?.customType, "typesafe-router-verification");
+    assert.deepEqual(verificationRecords[0]?.data, { verified: false });
     assert.equal(f.sendUserMessage.mock.callCount(), 0);
     assert.equal(f.http.mock.callCount(), 0);
     await f.session.prompt("Doctor must preserve off mode.");
     assert.deepEqual(f.generations, [{ provider, model: initialId }]);
-    assert.equal(f.records().length, before);
+    assert.equal(f.records().length, before + 1);
     assert.deepEqual(f.errors, []);
   });
 

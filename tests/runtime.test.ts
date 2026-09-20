@@ -105,6 +105,18 @@ const entrySchema = z.discriminatedUnion("type", [
       shadow: z.boolean(),
     }),
   }),
+  z.looseObject({
+    type: z.literal("typesafe-router-verification"),
+    data: z.discriminatedUnion("verified", [
+      z.object({ verified: z.literal(false) }),
+      z.object({
+        verified: z.literal(true),
+        fingerprint: z.string(),
+        passed: z.array(z.string()),
+        checkedAt: z.string(),
+      }),
+    ]),
+  }),
 ]);
 
 function unusedHostMethod(): never {
@@ -186,7 +198,16 @@ async function harness(options: Options = {}) {
       getEntries: () => [],
       getLeafId: () => null,
       buildContextEntries: () => [],
-      getBranch: () => [],
+      getBranch: () => {
+        const branch = entries.map((entry) => ({
+          type: "custom" as const,
+          customType: entry.type,
+          data: entry.data,
+        }));
+
+        // SAFETY: the router only reads the custom entry fields supplied above.
+        return branch as never;
+      },
     },
     modelRegistry: {
       getAll: () => models,
@@ -1266,6 +1287,92 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
 });
 
 describe("generation readiness gate", { timeout: 3000 }, () => {
+  it("restores successful doctor verification after an extension reload", async () => {
+    const h = await harness({ unverified: true });
+    await h.command("doctor");
+    assert.equal(h.classifications.length, 1);
+
+    await h.emit("session_start", { reason: "reload" });
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto"]);
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.equal(h.classifications.length, 2);
+    assert.deepEqual(h.selections, ["quick"]);
+  });
+
+  it("does not restore an older verification after a later doctor failure", async () => {
+    let failClassifier = false;
+
+    const h = await harness({
+      unverified: true,
+      classify: async () => {
+        if (failClassifier) throw new ClassifierError("credentials");
+
+        return classification();
+      },
+    });
+
+    await h.command("doctor");
+    failClassifier = true;
+    await h.command("doctor");
+    await h.emit("session_start", { reason: "reload" });
+
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto: doctor required"]);
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("tombstones a persisted verification when its fingerprint no longer matches", async () => {
+    const h = await harness({ unverified: true });
+    await h.command("doctor");
+    h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({ apiKey: "changed-reference" });
+    await h.emit("session_start", { reason: "reload" });
+
+    assert.deepEqual(h.entries.at(-1), {
+      type: "typesafe-router-verification",
+      data: { verified: false },
+    });
+
+    h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({ apiKey: SECRET });
+    await h.emit("session_start", { reason: "reload" });
+    assert.deepEqual(await h.input(), { action: "handled" });
+    assert.equal(h.classifications.length, 1);
+  });
+
+  it("clears verification when tree navigation reaches a branch without proof", async () => {
+    const h = await harness({ unverified: true });
+    await h.command("doctor");
+    h.entries.length = 0;
+    await h.emit("session_tree");
+    await h.command("on");
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.equal(h.classifications.length, 1);
+    assert.deepEqual(h.selections, []);
+  });
+
+  it("restores verification when tree navigation reaches a branch with valid proof", async () => {
+    let failClassifier = false;
+
+    const h = await harness({
+      unverified: true,
+      classify: async () => {
+        if (failClassifier) throw new ClassifierError("credentials");
+
+        return classification();
+      },
+    });
+
+    await h.command("doctor");
+    const verifiedBranch = [...h.entries];
+    failClassifier = true;
+    await h.command("doctor");
+    h.entries.splice(0, h.entries.length, ...verifiedBranch);
+    await h.emit("session_tree");
+    await h.command("on");
+    failClassifier = false;
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
+  });
+
   for (const mode of ["auto", "shadow"] as const)
     it(`${mode} startup blocks input and enabling until doctor succeeds`, async () => {
       const h = await harness({ unverified: true, config: config({ mode }) });
