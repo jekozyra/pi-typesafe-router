@@ -98,7 +98,7 @@ jobs:
           PACKAGE_TARBALL: ${{ github.workspace }}/artifacts/${{ steps.pack.outputs.tarball }}
         run: node scripts/package-smoke.mjs
       - name: Publish exact tarball with npm OIDC
-        run: npm publish "artifacts/${{ steps.pack.outputs.tarball }}" --ignore-scripts --access public --provenance --tag latest
+        run: npm publish "./artifacts/${{ steps.pack.outputs.tarball }}" --ignore-scripts --access public --provenance --tag latest
       - name: Create tag and GitHub Release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
