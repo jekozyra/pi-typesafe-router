@@ -99,7 +99,7 @@ test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tar
   assert.match(publishWorkflow, /PACKAGE_TARBALL:/);
   assert.match(
     publishWorkflow,
-    /npm publish .*--ignore-scripts --access public --provenance --tag latest/,
+    /npm publish "\.\/artifacts\/\$\{\{ steps\.pack\.outputs\.tarball \}\}" --ignore-scripts --access public --provenance --tag latest/,
   );
   assert.match(publishWorkflow, /gh release create/);
   assert.match(publishWorkflow, /npm publication succeeded but GitHub finalization failed/);
