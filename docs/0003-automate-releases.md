@@ -56,13 +56,13 @@ Do not merge `main` into a stale release branch. If `main` advances, rerun **Pre
 
 Configure npm trusted publishing for owner `jekozyra`, repository `pi-typesafe-router`, and workflow `publish.yml`. The workflow uses a GitHub-hosted runner, Node 22.23.2, npm 12.0.2, and `id-token: write`. We do not store an npm token.
 
-When the managed release pull request merges, `publish.yml` checks out its exact merge commit and validates the release diff against its parent. It runs repository checks, packs once, smoke-tests that tarball, and publishes the same file with lifecycle scripts disabled. After npm succeeds, it creates the immutable `vX.Y.Z` tag and matching GitHub Release from the changelog. Preparation and publication share the non-cancelling `release` concurrency group.
+When a commit reaches `main`, `publish.yml` looks up its associated pull requests. It publishes only when exactly one merged, same-repository managed release PR has that exact merge SHA. Ordinary pushes skip publication. We use `push` rather than `pull_request_target` because the PR-triggered run failed npm authorization while manual publication succeeded; the precise registry rejection remains unconfirmed. The workflow checks out the release's exact merge commit and validates the release diff against its parent. It runs repository checks, packs once, smoke-tests that tarball, and publishes the same file with lifecycle scripts disabled. After npm succeeds, it creates the immutable `vX.Y.Z` tag and matching GitHub Release from the changelog. Preparation and publication share the non-cancelling `release` concurrency group.
 
 Existing npm versions, tags, releases, ambiguous registry responses, stale candidates, forged release identity, and attempts to move `latest` backward stop publication.
 
 ## Repository setup
 
-Create a GitHub App installed only on `jekozyra/pi-typesafe-router`. Grant **Contents: read/write**, **Checks: read/write**, **Pull requests: read/write**, and **Metadata: read**. Add these Actions secrets:
+Create a GitHub App installed only on `jekozyra/pi-typesafe-router`. Grant **Contents: read/write**, **Checks: read/write**, **Pull requests: read/write**, **Workflows: read/write**, and **Metadata: read**. The publish job explicitly requests workflow write permission so GitHub can finalize releases at historical commits. Add these Actions secrets:
 
 - `RELEASE_APP_PRIVATE_KEY`
 - `OPENROUTER_API_KEY`
@@ -93,6 +93,8 @@ Configure npm trusted publishing for the exact `publish.yml` identity and permit
 - We use a manual preparation step instead of publishing from ordinary merges. This gives maintainers one reviewable release boundary.
 - We use npm OIDC instead of a stored npm token. Offline tests cannot prove account configuration or live publication.
 - Never force-move a release tag, unpublish a version, or move `latest` backward to repair a run.
+
+Publishing diagnostics show Node/npm versions, workflow context, an allowlist of OIDC identity claims, npm-registry HTTP statuses, and npm error codes. Provenance signing does not prove that npm authorized publication. An OIDC exchange failure points to trusted-publisher identity or authorization; a successful exchange followed by a failed registry PUT narrows the failure to publication. We never print the JWT, authorization headers, request URLs, auth configuration, or raw npm debug logs. The captured debug output is deleted after emitting the filtered summary.
 
 If a run fails before npm publication, merge any workflow fix first, then run **Publish release** manually from `main` with the merged release PR number in `release-pr`. The workflow resolves the PR through GitHub, checks out its exact merge commit, and repeats the managed-release identity, candidate, and publication-conflict checks. It does not publish the current `main` checkout or accept an arbitrary SHA. This lets a corrected workflow recover an already-merged release without creating a new version.
 

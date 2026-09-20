@@ -88,8 +88,12 @@ test("release preparation is manual, version-only, serialized, and App-authored"
 });
 
 test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tarball", () => {
-  assert.match(publishWorkflow, /types: \[closed\]/);
-  assert.match(publishWorkflow, /pull_request\.merged == true/);
+  assert.match(publishWorkflow, /push:\n    branches: \[main\]/);
+  assert.doesNotMatch(publishWorkflow, /pull_request_target:/);
+  assert.match(publishWorkflow, /\.merge_commit_sha == \$sha/);
+  assert.match(publishWorkflow, /if: needs\.resolve\.outputs\.pr != ''/);
+  assert.doesNotMatch(publishWorkflow, /^concurrency:/m);
+  assert.match(publishWorkflow, /    concurrency:\n      group: release/);
   assert.match(publishWorkflow, /merge_commit_sha/);
   assert.match(publishWorkflow, /id-token: write/);
   assert.match(publishWorkflow, /permission-workflows: write/);
@@ -100,7 +104,7 @@ test("publication is merge-gated, OIDC-enabled, exact-revision, and uses one tar
   assert.match(publishWorkflow, /PACKAGE_TARBALL:/);
   assert.match(
     publishWorkflow,
-    /npm publish "\.\/artifacts\/\$\{\{ steps\.pack\.outputs\.tarball \}\}" --ignore-scripts --access public --provenance --tag latest/,
+    /npm publish "\.\/artifacts\/\$RELEASE_TARBALL" --ignore-scripts --access public --provenance --tag latest/,
   );
   assert.match(publishWorkflow, /gh release create/);
   assert.match(publishWorkflow, /npm publication succeeded but GitHub finalization failed/);
@@ -116,15 +120,10 @@ test("publish runtime satisfies the pinned npm engine requirement", () => {
 test("manual publication resolves a merged same-repository release on main before checkout", () => {
   assert.match(publishWorkflow, /workflow_dispatch:/);
   assert.match(publishWorkflow, /release-pr:/);
-  assert.match(
-    publishWorkflow,
-    /github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main'/,
-  );
+  assert.match(publishWorkflow, /if: github\.ref == 'refs\/heads\/main'/);
   assert.match(publishWorkflow, /pull-requests: read/);
-  assert.match(
-    publishWorkflow,
-    /RELEASE_PR: \$\{\{ inputs\.release-pr \|\| github\.event\.pull_request\.number \}\}/,
-  );
+  assert.match(publishWorkflow, /RELEASE_PR: \$\{\{ needs\.resolve\.outputs\.pr \}\}/);
+  assert.match(publishWorkflow, /RELEASE_PR: \$\{\{ inputs\.release-pr \}\}/);
   assert.match(publishWorkflow, /gh api "repos\/\$GITHUB_REPOSITORY\/pulls\/\$RELEASE_PR"/);
   assert.match(publishWorkflow, /\.merged == true and/);
   assert.match(publishWorkflow, /\.base\.ref == "main" and/);
