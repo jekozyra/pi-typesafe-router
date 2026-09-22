@@ -23,6 +23,7 @@ test("strict config has safe defaults and preserves slash-containing model IDs",
     version: 1,
     mode: "off",
     allowHeadless: false,
+    showFooterStatus: true,
     backend: {
       type: "typesafe",
       model: "jev-1.13.0",
@@ -131,6 +132,7 @@ test("numeric constraints do not coerce and reject fractional integer fields", (
     version: [2],
     mode: ["enabled"],
     allowHeadless: ["false"],
+    showFooterStatus: ["false"],
     defaultRoute: ["uncertain"],
     uncertainRoute: ["other"],
   }))

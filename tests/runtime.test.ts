@@ -370,6 +370,25 @@ async function harness(options: Options = {}) {
 
 // A hung regression should fail quickly rather than leave a pending test indefinitely.
 describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
+  for (const [mode, label] of [
+    ["auto", "on · doctor required"],
+    ["shadow", "shadow · doctor required"],
+    ["off", "off"],
+  ] as const)
+    it(`shows ${label} in the persistent router status`, async () => {
+      const h = await harness({ unverified: true, config: config({ mode }) });
+      assert.deepEqual(h.statuses.at(-1), ["typesafe-router", `router: ${label}`]);
+    });
+
+  it("allows the footer status to be disabled in configuration", async () => {
+    const h = await harness({
+      unverified: true,
+      config: config({ mode: "auto", showFooterStatus: false }),
+    });
+
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", undefined]);
+  });
+
   it("off does not classify or select", async () => {
     const h = await harness({ config: config({ mode: "off" }) });
     assert.deepEqual(await h.input(), { action: "continue" });
@@ -563,12 +582,25 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     assert.deepEqual(h.sent, []);
   });
 
-  it("shadow classifies and records a decision but never sets a model", async () => {
+  it("shows the last classified route and target without selecting in shadow mode", async () => {
     const h = await harness({ config: config({ mode: "shadow" }) });
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 1);
     assert.deepEqual(h.selections, []);
     assert.equal(h.decisions()[0].shadow, true);
+    assert.deepEqual(h.statuses.at(-1), [
+      "typesafe-router",
+      "router: shadow · last: quick → fixture/quick",
+    ]);
+  });
+
+  it("shows the last classified route and selected target in on mode", async () => {
+    const h = await harness();
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.statuses.at(-1), [
+      "typesafe-router",
+      "router: on · last: quick → fixture/quick",
+    ]);
   });
 
   it("Escape consumes the key, aborts classification and handles the unsent prompt", async () => {
@@ -634,6 +666,7 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
     await h.input();
     assert.equal(h.classifications.length, 2);
     await h.emit("model_select", { model: model("deep"), source: "cycle" });
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: off"]);
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 2);
     assert.deepEqual(h.selections, ["quick", "quick"]);
@@ -641,6 +674,13 @@ describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
       h.entries.filter((entry) => entry.type === "typesafe-router-mode").at(-1)?.data.mode,
       "off",
     );
+  });
+
+  it("clears the last classification status after session tree navigation", async () => {
+    const h = await harness();
+    await h.input();
+    await h.emit("session_tree");
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: off"]);
   });
 
   it("generation failure guides manual /model recovery without replay or selection", async () => {
@@ -1293,7 +1333,7 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
     assert.equal(h.classifications.length, 1);
 
     await h.emit("session_start", { reason: "reload" });
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto"]);
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: on"]);
     assert.deepEqual(await h.input(), { action: "continue" });
     assert.equal(h.classifications.length, 2);
     assert.deepEqual(h.selections, ["quick"]);
@@ -1316,7 +1356,7 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
     await h.command("doctor");
     await h.emit("session_start", { reason: "reload" });
 
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto: doctor required"]);
+    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "router: on · doctor required"]);
     assert.deepEqual(await h.input(), { action: "handled" });
     assert.deepEqual(h.selections, []);
   });
@@ -1564,6 +1604,21 @@ describe("generation readiness gate", { timeout: 3000 }, () => {
       assert.match(h.notifications.at(-1)!, /doctor/i);
       assert.ok(!JSON.stringify(h.entries).includes("CHANGED_KEY_REFERENCE"));
     });
+
+  it("does not invalidate routing proof for a footer-only disk change", async () => {
+    let disk = config();
+    const h = await harness({ load: async () => disk });
+    disk = config({ showFooterStatus: false });
+
+    assert.deepEqual(await h.input(), { action: "continue" });
+    assert.deepEqual(h.selections, ["quick"]);
+    assert.equal(
+      h.entries.some(
+        (entry) => entry.type === "typesafe-router-verification" && entry.data.verified === false,
+      ),
+      false,
+    );
+  });
 
   it("on rechecks disk before enabling a previously verified off session", async () => {
     let disk = config({ mode: "off" });

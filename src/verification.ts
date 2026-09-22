@@ -34,6 +34,7 @@ export function verificationFingerprint(
   config: RouterConfig,
   registry: RouterContext["modelRegistry"],
 ) {
+  const { showFooterStatus: _showFooterStatus, ...routingConfig } = config;
   const targets = configuredTargets(config);
   const providerIds = new Set(targets.map((target) => target.provider));
 
@@ -52,7 +53,9 @@ export function verificationFingerprint(
     model: registry.find(target.provider, target.model),
   }));
 
-  return createHash("sha256").update(JSON.stringify({ config, providers, models })).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify({ config: routingConfig, providers, models }))
+    .digest("hex");
 }
 
 export interface VerifiedGeneration {

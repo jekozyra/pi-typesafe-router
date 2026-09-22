@@ -126,13 +126,25 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   }
 
   function status(ctx: RouterContext) {
-    if (ctx.hasUI)
-      ctx.ui.setStatus(
-        NAME,
-        mode === "off"
-          ? undefined
-          : `Jev ${mode}${active ? `: ${active.phase}` : !verified ? ": doctor required" : last?.target ? `: ${targetKey(last.target)}` : ""}`,
-      );
+    if (!ctx.hasUI) return;
+
+    if (config?.showFooterStatus === false) {
+      ctx.ui.setStatus(NAME, undefined);
+
+      return;
+    }
+
+    const label = mode === "auto" ? "on" : mode;
+
+    const detail = active
+      ? active.phase
+      : mode !== "off" && !verified
+        ? "doctor required"
+        : last
+          ? `last: ${last.route} → ${last.target ? targetKey(last.target) : "no eligible model"}`
+          : undefined;
+
+    ctx.ui.setStatus(NAME, `router: ${label}${detail ? ` · ${detail}` : ""}`);
   }
 
   function invalidateVerification() {
@@ -286,11 +298,7 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
 
       if (!isCurrent(op)) return false;
 
-      if (
-        !fresh ||
-        JSON.stringify(fresh) !== JSON.stringify(cfg) ||
-        verified.fingerprint !== verificationFingerprint(cfg, ctx.modelRegistry)
-      ) {
+      if (!fresh || verified.fingerprint !== verificationFingerprint(fresh, ctx.modelRegistry)) {
         invalidateVerification();
         notify(
           ctx,
@@ -952,9 +960,9 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
   pi.on("session_before_tree", beforeNavigation);
   pi.on("session_tree", (_event, ctx) => {
     restoreVerification(ctx);
-    setMode("off", ctx);
     last = undefined;
     generationFailed = false;
+    setMode("off", ctx);
   });
   pi.on("input", async (event, ctx) => {
     try {
@@ -978,7 +986,10 @@ export function registerRouter(pi: RouterAPI, dependencies: Dependencies = {}): 
     if (mode !== "off" || active) {
       setMode("off", ctx);
       notify(ctx, "External model selection: automatic routing is now off.");
-    } else cancel(); // Also invalidate pending enable dialogs while already off.
+    } else {
+      cancel(); // Also invalidate pending enable dialogs while already off.
+      status(ctx);
+    }
   });
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant")
