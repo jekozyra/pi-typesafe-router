@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -38,6 +39,10 @@ try {
 
   assert.ok(packed, "npm pack did not return package metadata");
   assert.ok(packed.files.some((file) => file.path === "src/index.ts"));
+  assert.ok(
+    packed.files.some((file) => file.path === "policy.json"),
+    "Missing bundled classifier policy",
+  );
 
   for (const example of ["typesafe", "cloudflare", "vercel", "openrouter"])
     assert.ok(
@@ -48,6 +53,9 @@ try {
   for (const adr of [
     "docs/0001-route-before-generation.md",
     "docs/0002-verify-routing-with-doctor.md",
+    "docs/0004-route-local-verification-and-recovery.md",
+    "docs/0005-policy-provenance-and-local-diagnostics.md",
+    "docs/0006-routing-telemetry-boundaries.md",
   ]) {
     assert.ok(
       packed.files.some((file) => file.path === adr),
@@ -57,7 +65,7 @@ try {
 
   assert.ok(
     packed.files.every((file) =>
-      /^(src\/[^/]+\.ts|examples\/[^/]+\.json|docs\/\d{4}-[a-z-]+\.md|README\.md|LICENSE|package\.json)$/.test(
+      /^(src\/[^/]+\.ts|examples\/[^/]+\.json|docs\/\d{4}-[a-z-]+\.md|README\.md|LICENSE|package\.json|policy\.json)$/.test(
         file.path,
       ),
     ),
@@ -79,6 +87,62 @@ try {
     ],
     { cwd: temp, stdio: "inherit" },
   );
+
+  // The bundled rubric ships beside the extension and must still validate as an artifact.
+  const installedPolicy = JSON.parse(
+    await readFile(join(temp, "node_modules/pi-typesafe-router/policy.json"), "utf8"),
+  );
+
+  assert.equal(installedPolicy.version, 1);
+  assert.deepEqual(Object.keys(installedPolicy.criteria).sort(), [
+    "deep",
+    "quick",
+    "standard",
+    "uncertain",
+  ]);
+
+  // The installed TYPESCRIPT, not only the bundled JSON shape: the packed module must resolve an
+  // external rubric and refuse a malformed one, offline and without echoing the path. Node
+  // refuses type stripping under `node_modules`, so the shipped files are copied out first —
+  // which also asserts they are present in the tarball.
+  const artifact = join(temp, "artifact");
+  await mkdir(join(artifact, "src"), { recursive: true });
+
+  for (const file of ["src/policy.ts", "src/types.ts", "src/bounded-file.ts", "policy.json"]) {
+    await copyFile(join(temp, "node_modules/pi-typesafe-router", file), join(artifact, file));
+  }
+
+  const policyModule = pathToFileURL(join(artifact, "src/policy.ts")).href;
+
+  const policyProbe = `
+import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+const { loadPolicy, resolvePolicy } = await import(${JSON.stringify(policyModule)});
+const bundled = await resolvePolicy(undefined);
+assert.equal(bundled.version, 1);
+const external = { ...bundled, id: "external-rubric", question: "external_class" };
+const valid = join(process.cwd(), "external-policy.json");
+await writeFile(valid, JSON.stringify(external));
+const loaded = await loadPolicy(valid);
+assert.equal(loaded.id, "external-rubric");
+assert.equal(loaded.question, "external_class");
+const malformed = join(process.cwd(), "malformed-policy.json");
+await writeFile(malformed, JSON.stringify({ ...bundled, id: "Bad Id" }));
+await assert.rejects(loadPolicy(malformed), /Invalid routing policy/);
+await assert.rejects(
+  loadPolicy(malformed),
+  (error) => !String(error.message).includes("malformed-policy"),
+);
+console.log("Packed artifact resolves external policies and rejects malformed ones.");
+`;
+
+  execFileSync(
+    process.execPath,
+    ["--experimental-strip-types", "--input-type=module", "--eval", policyProbe],
+    { cwd: temp, stdio: "inherit" },
+  );
+
   await mkdir(join(temp, "profile"));
   await writeFile(
     join(temp, "smoke.mjs"),

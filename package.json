@@ -17,10 +17,14 @@
   "files": [
     "src",
     "examples",
+    "policy.json",
     "README.md",
     "LICENSE",
     "docs/0001-route-before-generation.md",
-    "docs/0002-verify-routing-with-doctor.md"
+    "docs/0002-verify-routing-with-doctor.md",
+    "docs/0004-route-local-verification-and-recovery.md",
+    "docs/0005-policy-provenance-and-local-diagnostics.md",
+    "docs/0006-routing-telemetry-boundaries.md"
   ],
   "type": "module",
   "scripts": {

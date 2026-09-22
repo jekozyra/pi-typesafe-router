@@ -1,6 +1,6 @@
 # ADR 0002: Gate routing on session-local doctor verification
 
-Status: Accepted — implemented
+Status: Superseded by [ADR 0004](0004-route-local-verification-and-recovery.md).
 
 ## Context
 

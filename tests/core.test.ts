@@ -7,11 +7,23 @@ import { estimateTokens, type ContextUsage } from "@earendil-works/pi-coding-age
 import type { UserMessage } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/settings.ts";
 import { parseConfig } from "../src/config.ts";
-import { contextInputTokens, projectState } from "../src/context.ts";
+import { contextInputTokens, projectState as projectStateWithRoles } from "../src/context.ts";
 import { candidateChecks, chooseRoute } from "../src/routing.ts";
 import type { Classification, Eligibility, ModelInfo, Target } from "../src/types.ts";
 
-const target: Target = { provider: "example", model: "organization/model-id" };
+const target: Target = { provider: "example", model: "organization/model-id", thinking: "high" };
+
+/**
+ * The historical version-1 projection: the caller states the roles. Version-2 configs are
+ * covered in `config.test.ts` and `context.test.ts`; these cases keep the v1 contract that an
+ * already-installed file must not be silently reinterpreted.
+ */
+const projectState = (
+  current: string,
+  history: readonly { role: string; content: unknown }[],
+  maxChars: number,
+  historyMessages: number,
+) => projectStateWithRoles(current, history, maxChars, historyMessages, ["user", "assistant"]);
 
 const minimal = () => ({
   routes: { quick: [{ ...target }], standard: [{ ...target }], deep: [{ ...target }] },
@@ -128,7 +140,7 @@ test("numeric constraints do not coerce and reject fractional integer fields", (
     maxContextChars: [255, 32001, 256.5],
     historyMessages: [-1, 21, 1.5],
     outputReserveTokens: [0, 255, 131073, 256.5],
-    version: [2],
+    version: [3],
     mode: ["enabled"],
     allowHeadless: ["false"],
     defaultRoute: ["uncertain"],
@@ -305,7 +317,7 @@ const eligibility = (overrides: Partial<Eligibility> = {}): Eligibility => ({
 });
 
 test("candidate checks preserve order and distinguish unknown from known unavailable", () => {
-  const unknown = { provider: "other", model: target.model };
+  const unknown = { provider: "other", model: target.model, thinking: "high" } as const;
   const checks = candidateChecks([unknown, target], eligibility());
   assert.deepEqual(
     checks.map((check) => check.target),

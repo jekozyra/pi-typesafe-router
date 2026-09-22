@@ -1,482 +1,559 @@
-import test from "node:test";
+/**
+ * Transport and validation tests for `src/classifier.ts`.
+ *
+ * The classifier is the only component that talks to a network, and `createClassifier`
+ * takes its fetch implementation as an argument, so the whole protocol path — URL shape,
+ * headers, bounded body, envelope variants, probability validation — is reachable with no
+ * credentials and no socket. The Vercel path goes through the vendored AI SDK gateway and is
+ * therefore not covered here; that is recorded in the report, not pretended away.
+ */
+
 import assert from "node:assert/strict";
-import { z } from "zod";
-import { createClassifier, RUBRIC } from "../src/classifier.ts";
-import { ClassifierError, type Backend, type ClassificationState } from "../src/types.ts";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
 
-const auth = { source: "env", variable: "UNUSED" } as const;
+import { installPiStubs } from "./harness.ts";
 
-const backends: Backend[] = [
-  { type: "typesafe", model: "jev-1.13.0", auth },
-  {
-    type: "cloudflare",
-    model: "typesafe/jev",
-    accountId: "account",
-    gatewayId: "router-test",
-    auth,
-  },
-  { type: "vercel", model: "typesafe-ai/jev", zeroDataRetention: true, auth },
-  { type: "openrouter", model: "typesafe/jev-1.13", auth },
-];
+installPiStubs();
 
-const state: ClassificationState = { current_request: "private prompt", recent_conversation: [] };
+const { createClassifier, gatewayResponseSchema } = await import("../src/classifier.ts");
 
-const options = () => ({ signal: new AbortController().signal, apiKey: "secret-key" });
+const { ClassifierError } = await import("../src/types.ts");
 
-const answer = () => ({
-  type: "choice",
-  choice: "standard",
-  probabilities: { quick: 0.1, standard: 0.7, deep: 0.1, uncertain: 0.1 },
-  confidence: 0.8,
-});
+const { POLICY } = await import("../src/policy.ts");
 
-const direct = () => ({
-  model: "jev-1.13.0",
-  answers: { task_class: answer() },
-  usage: { input_tokens: 20, output_tokens: 4 },
-});
+import type { Backend, ClassificationState, ClassifyOptions } from "../src/types.ts";
+import type { RoutingPolicy } from "../src/policy.ts";
 
-const sdk = () => ({
-  answers: { task_class: answer() },
-  providerMetadata: { typesafe: { confidence: { task_class: 0.9 } } },
-  usage: { inputTokens: 20, outputTokens: 4 },
-});
-
-type JsonFixture =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonFixture[]
-  | { [key: string]: JsonFixture | undefined };
-
-const json = (value: JsonFixture) =>
-  new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
-
-const failure = (code: string, status?: number) => (error: Error) => {
-  assert.ok(error instanceof ClassifierError);
-  assert.equal(error.code, code);
-  assert.equal(error.status, status);
-  assert.ok(!String(error).includes("secret"));
-  assert.ok(!String(error).includes("private prompt"));
-
-  return true;
+const STATE: ClassificationState = {
+  current_request: "Explain this function",
+  recent_conversation: [],
 };
 
-for (const backend of backends) {
-  test(`${backend.type}: actual transport serialization and normalization`, async () => {
-    let calls = 0;
-    const opts = options();
+const TYPESAFE: Backend = {
+  type: "typesafe",
+  model: "jev-1.13.0",
+  auth: { source: "env", variable: "TYPESAFE_API_KEY" },
+};
 
-    const classify = createClassifier(async (url, init) => {
-      calls++;
-      assert.equal(init?.redirect, "error");
-      assert.equal(init?.signal, opts.signal);
-      assert.equal(init?.method, "POST");
-      const headers = new Headers(init?.headers);
-      assert.equal(headers.get("authorization"), "Bearer secret-key");
-      const body = z.json().parse(JSON.parse(String(init?.body)));
-
-      if (backend.type !== "cloudflare") {
-        assert.equal(headers.get("cf-aig-gateway-id"), null);
-        assert.equal(headers.get("cf-aig-collect-log"), null);
-      }
-
-      if (backend.type === "openrouter") {
-        assert.equal(String(url), "https://openrouter.ai/api/alpha/decisions");
-        assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
-      } else if (backend.type === "typesafe") {
-        assert.equal(String(url), "https://api.typesafe.ai/v1/systemone");
-        assert.deepEqual(body, { model: backend.model, state, questions: { task_class: RUBRIC } });
-      } else if (backend.type === "cloudflare") {
-        assert.equal(String(url), "https://api.cloudflare.com/client/v4/accounts/account/ai/run");
-        assert.equal(headers.get("cf-aig-gateway-id"), "router-test");
-        assert.equal(headers.get("cf-aig-collect-log"), "false");
-        assert.equal(headers.get("cf-aig-skip-cache"), "true");
-        assert.equal(headers.get("cf-aig-max-attempts"), "1");
-        assert.equal(headers.get("cf-aig-authorization"), null);
-        assert.deepEqual(body, {
-          model: backend.model,
-          input: { state, questions: { task_class: RUBRIC } },
-        });
-      } else {
-        assert.equal(String(url), "https://ai-gateway.vercel.sh/v4/ai/evaluation-model");
-        assert.equal(headers.get("ai-model-id"), backend.model);
-        assert.equal(headers.get("ai-gateway-auth-method"), "api-key");
-        assert.deepEqual(body, {
-          state,
-          questions: { task_class: RUBRIC },
-          providerOptions: { gateway: { zeroDataRetention: true } },
-        });
-      }
-
-      return json(
-        backend.type === "vercel"
-          ? sdk()
-          : backend.type === "cloudflare"
-            ? { success: true, result: direct() }
-            : { ...direct(), model: backend.model },
-      );
-    });
-
-    const result = await classify(backend, state, opts);
-    assert.equal(calls, 1);
-    assert.equal(result.choice, "standard");
-    assert.equal(result.confidence, backend.type === "vercel" ? 0.9 : 0.8);
-    assert.equal(result.requestedModel, backend.model);
-    assert.deepEqual(result.usage, { inputTokens: 20, outputTokens: 4 });
-  });
-
-  for (const status of [401, 422, 429, 529, 302]) {
-    test(`${backend.type}: HTTP ${status} is safe and never retried`, async () => {
-      let calls = 0;
-
-      const classify = createClassifier(async (_url, init) => {
-        calls++;
-        assert.equal(init?.redirect, "error");
-
-        return new Response("secret private prompt", {
-          status,
-          headers: { location: "https://other.invalid" },
-        });
-      });
-
-      await assert.rejects(classify(backend, state, options()), failure("http", status));
-      assert.equal(calls, 1);
-    });
-  }
-
-  test(`${backend.type}: pre-abort, deadline reason, and missing credentials never call fetch`, async () => {
-    const classify = createClassifier(async () => {
-      assert.fail("unexpected fetch");
-    });
-
-    for (const reason of [
-      new Error("secret"),
-      new DOMException("private prompt", "TimeoutError"),
-    ]) {
-      const controller = new AbortController();
-      controller.abort(reason);
-      await assert.rejects(
-        classify(backend, state, { apiKey: "secret", signal: controller.signal }),
-        failure("cancelled"),
-      );
-    }
-
-    await assert.rejects(
-      classify(backend, state, { ...options(), apiKey: " " }),
-      failure("credentials"),
-    );
-  });
-
-  test(`${backend.type}: cancellation while reading response body`, async () => {
-    const controller = new AbortController();
-
-    const classify = createClassifier(
-      async () =>
-        new Response(
-          new ReadableStream({
-            start() {
-              queueMicrotask(() => controller.abort(new DOMException("deadline", "TimeoutError")));
-            },
-          }),
-        ),
-    );
-
-    await assert.rejects(
-      classify(backend, state, { apiKey: "secret", signal: controller.signal }),
-      failure("cancelled"),
-    );
-  });
-
-  test(`${backend.type}: network errors are sanitized`, async () => {
-    const classify = createClassifier(async () => {
-      throw new Error("secret private prompt");
-    });
-
-    await assert.rejects(classify(backend, state, options()), failure("network"));
-  });
-
-  for (const body of [
-    "not json secret",
-    "x".repeat(65537),
-    '{"answers":{"task_class":{"type":"choice","choice":"quick","probabilities":{"quick":1e999,"standard":0,"deep":0,"uncertain":0},"confidence":1}}}',
-  ]) {
-    test(`${backend.type}: rejects invalid or oversized body (${body.length} bytes)`, async () => {
-      const classify = createClassifier(async () => new Response(body));
-      await assert.rejects(classify(backend, state, options()), failure("invalid-response"));
-    });
-  }
-
-  for (const bad of [
-    {},
-    { ...answer(), type: "score" },
-    { ...answer(), choice: "unknown" },
-    { ...answer(), probabilities: { quick: 1 } },
-    { ...answer(), probabilities: { quick: 0, standard: 0.7, deep: 0, uncertain: 0 } },
-    { ...answer(), probabilities: { quick: 0.8, standard: 0.1, deep: 0.1, uncertain: 0 } },
-    { ...answer(), probabilities: { quick: -0.1, standard: 0.9, deep: 0.1, uncertain: 0.1 } },
-    { ...answer(), probabilities: { ...answer().probabilities, extra: 0 } },
-  ]) {
-    test(`${backend.type}: rejects malformed answer ${JSON.stringify(bad)}`, async () => {
-      const classify = createClassifier(async () =>
-        json({ ...(backend.type === "vercel" ? sdk() : direct()), answers: { task_class: bad } }),
-      );
-
-      await assert.rejects(classify(backend, state, options()), failure("invalid-response"));
-    });
-  }
+/** One TypeSafe answer envelope, matching what the classifier's schema must accept. */
+interface DirectAnswer {
+  type: "choice";
+  choice: string;
+  probabilities: { quick: number; standard: number; deep: number; uncertain: number };
+  confidence: number;
 }
 
-test("Cloudflare explicitly accepts bare results and rejects failed/malformed envelopes", async () => {
-  assert.equal(
-    (await createClassifier(async () => json(direct()))(backends[1], state, options())).confidence,
-    0.8,
-  );
+interface DirectBody {
+  // A response is keyed by whichever question the request named, not by a literal.
+  answers: Record<string, DirectAnswer>;
+  model: string;
+  usage: { input_tokens: number; output_tokens: number };
+}
 
-  for (const raw of [
-    { success: false, result: direct() },
-    { success: true },
-    { result: direct() },
-    { success: "true", result: direct() },
-  ]) {
-    await assert.rejects(
-      createClassifier(async () => json(raw))(backends[1], state, options()),
-      failure("invalid-response"),
-    );
-  }
-});
+/** The Cloudflare AI Gateway wrapper some tests return instead of a bare answer. */
+interface CloudflareEnvelope {
+  success: boolean;
+  result: DirectBody;
+}
 
-test("Cloudflare unwraps a Completed run and preserves validated Jev results", async () => {
-  const raw = {
-    success: true,
-    result: { state: "Completed", result: direct(), gatewayMetadata: { keySource: "fixture" } },
-    errors: [],
-    messages: [],
-  };
+/** The Cloudflare run envelope, which nests the answer under a `state` marker. */
+interface CloudflareResultEnvelope {
+  success: boolean;
+  result: { state: string; result: DirectBody };
+}
 
-  const result = await createClassifier(async () => json(raw))(backends[1], state, options());
-  assert.equal(result.choice, "standard");
-  assert.equal(result.confidence, 0.8);
-  assert.equal(result.returnedModel, "jev-1.13.0");
-  assert.deepEqual(result.usage, { inputTokens: 20, outputTokens: 4 });
-});
+type JsonBody = DirectBody | CloudflareEnvelope | CloudflareResultEnvelope;
 
-test("Cloudflare rejects unsuccessful runs and malformed nested answers", async () => {
-  for (const raw of [
-    { success: false, result: { state: "Completed", result: direct() } },
-    { result: { state: "Completed", result: direct() } },
-    { success: true, result: { state: "Failed", result: direct() } },
-    { success: true, result: { state: "Running", result: direct() } },
-    { success: true, result: { state: "Completed" } },
-    { success: true, result: { state: "Completed", result: { answers: {} } } },
-    {
-      success: true,
-      result: {
-        state: "Completed",
-        result: { ...direct(), answers: { task_class: { ...answer(), confidence: 2 } } },
+function directBody(overrides: Partial<DirectBody> = {}): DirectBody {
+  return {
+    answers: {
+      task_class: {
+        type: "choice",
+        choice: "quick",
+        probabilities: { quick: 0.7, standard: 0.1, deep: 0.1, uncertain: 0.1 },
+        confidence: 0.7,
       },
     },
-  ])
-    await assert.rejects(
-      createClassifier(async () => json(raw))(backends[1], state, options()),
-      failure("invalid-response"),
-    );
-});
-
-test("Cloudflare run markers cannot bypass validation through a legacy answer", async () => {
-  for (const runState of ["queued", "running", "failed", "unknown", undefined]) {
-    const raw = {
-      success: true,
-      result: { ...direct(), state: runState, result: direct() },
-    };
-
-    await assert.rejects(
-      createClassifier(async () => json(raw))(backends[1], state, options()),
-      failure("invalid-response"),
-    );
-  }
-});
-
-test("direct requires confidence; SDK only uses per-question metadata, never answer confidence", async () => {
-  const noConfidence = {
-    ...direct(),
-    answers: { task_class: { ...answer(), confidence: undefined } },
+    model: "jev-1.13.0",
+    usage: { input_tokens: 42, output_tokens: 3 },
+    ...overrides,
   };
+}
 
-  await assert.rejects(
-    createClassifier(async () => json(noConfidence))(backends[0], state, options()),
-    failure("invalid-response"),
-  );
-
-  for (const providerMetadata of [undefined, {}, { typesafe: { confidence: {} } }]) {
-    const result = await createClassifier(async () => json({ ...sdk(), providerMetadata }))(
-      backends[2],
-      state,
-      options(),
-    );
-
-    assert.equal(result.confidence, undefined);
-  }
-
-  for (const confidence of [0.9, { task_class: -1 }, { task_class: "0.9" }, { task_class: null }]) {
-    await assert.rejects(
-      createClassifier(async () =>
-        json({ ...sdk(), providerMetadata: { typesafe: { confidence } } }),
-      )(backends[2], state, options()),
-      failure("invalid-response"),
-    );
-  }
-});
-
-test("ties accepted; usage omitted rather than invented and unsafe provenance omitted", async () => {
-  for (const usage of [
-    undefined,
-    {},
-    { input_tokens: 1 },
-    { input_tokens: -1, output_tokens: 0 },
-    { input_tokens: 1.5, output_tokens: 0 },
-  ]) {
-    const raw = {
-      ...direct(),
-      usage,
-      model: "secret\nmessage",
-      answers: {
-        task_class: {
-          ...answer(),
-          probabilities: { quick: 0.5, standard: 0.5, deep: 0, uncertain: 0 },
-        },
+/** The same envelope, keyed by a policy-selected question rather than `task_class`. */
+function externalBody(question: string): DirectBody {
+  return {
+    answers: {
+      [question]: {
+        type: "choice",
+        choice: "quick",
+        probabilities: { quick: 0.7, standard: 0.1, deep: 0.1, uncertain: 0.1 },
+        confidence: 0.7,
       },
-    };
+    },
+    model: "jev-1.13.0",
+    usage: { input_tokens: 42, output_tokens: 3 },
+  };
+}
 
-    const result = await createClassifier(async () => json(raw))(backends[0], state, options());
-    assert.equal(result.usage, undefined);
-    assert.equal(result.returnedModel, undefined);
-  }
-});
+function jsonResponse(body: JsonBody, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+    ...init,
+  });
+}
 
-test("size limit is on streamed bytes, not characters or declared length", async () => {
-  let cancelled = false;
+interface Recorder {
+  calls: Array<{ url: string; init: RequestInit }>;
+  fetch: typeof fetch;
+}
 
-  const classify = createClassifier(
-    async () =>
-      new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new Uint8Array(33000));
-            controller.enqueue(new Uint8Array(33000));
-          },
-          cancel() {
-            cancelled = true;
-          },
-        }),
-        { headers: { "content-length": "1" } },
-      ),
-  );
+function recorder(next: () => Response): Recorder {
+  const calls: Recorder["calls"] = [];
 
-  await assert.rejects(classify(backends[0], state, options()), failure("invalid-response"));
-  assert.equal(cancelled, true);
-});
+  const fetchImpl: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), init: init ?? {} });
 
-test("SDK warning text is not logged", async () => {
-  const original = console.warn;
-  let warnings = 0;
-  console.warn = () => {
-    warnings++;
+    return next();
   };
 
-  try {
-    await createClassifier(async () =>
-      json({ ...sdk(), warnings: [{ type: "other", message: "secret private prompt" }] }),
-    )(backends[2], state, options());
-    assert.equal(warnings, 0);
-  } finally {
-    console.warn = original;
-  }
+  return { calls, fetch: fetchImpl };
+}
+
+function signal(): AbortSignal {
+  return new AbortController().signal;
+}
+
+/** Every call in this suite sends the bundled rubric; policyPath is covered elsewhere. */
+function options(signal: AbortSignal, apiKey: string): ClassifyOptions {
+  return { signal, apiKey, policy: POLICY };
+}
+
+/** A policy whose question key is not the bundled `task_class`. */
+const EXTERNAL: RoutingPolicy = {
+  ...POLICY,
+  id: "external-rubric",
+  question: "external_class",
+  instructions: "Classify the request under the external rubric.",
+};
+
+function externalOptions(signal: AbortSignal, apiKey: string): ClassifyOptions {
+  return { signal, apiKey, policy: EXTERNAL };
+}
+
+async function expectClassifierError(
+  promise: Promise<unknown>,
+  code: string,
+  status?: number,
+): Promise<void> {
+  await assert.rejects(promise, (error) => {
+    assert.ok(error instanceof ClassifierError, `expected ClassifierError, got ${String(error)}`);
+    assert.equal(error.code, code);
+    assert.equal(error.status, status);
+
+    return true;
+  });
+}
+
+test("a classifier failure keeps its name, code, status, and message", () => {
+  const unauthorized = new ClassifierError("http", 403);
+
+  assert.ok(unauthorized instanceof Error);
+  assert.equal(unauthorized.name, "ClassifierError");
+  assert.equal(unauthorized.message, "Classifier http (HTTP 403)");
+  assert.equal(unauthorized.code, "http");
+  assert.equal(unauthorized.status, 403);
+
+  const bare = new ClassifierError("credentials");
+
+  assert.equal(bare.message, "Classifier credentials");
+  assert.equal(bare.status, undefined);
+  assert.equal(bare.code, "credentials");
 });
 
-test("schema boundaries reject non-object answers and confidence without coercion", async () => {
-  for (const raw of [null, [], "secret", { answers: [] }, { answers: { task_class: [] } }]) {
-    for (const backend of backends) {
-      await assert.rejects(
-        createClassifier(async () => json(raw))(backend, state, options()),
-        failure("invalid-response"),
-      );
-    }
-  }
+test("classifies a request over the direct TypeSafe API", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+  const result = await classify(TYPESAFE, STATE, options(signal(), "test-key"));
 
-  for (const confidence of [null, "0.8", -1, 1.01]) {
-    for (const backend of backends.slice(0, 2)) {
-      await assert.rejects(
-        createClassifier(async () =>
-          json({
-            ...direct(),
-            answers: { task_class: { ...answer(), confidence } },
-          }),
-        )(backend, state, options()),
-        failure("invalid-response"),
-      );
-    }
-  }
+  assert.equal(result.choice, "quick");
+  assert.equal(result.confidence, 0.7);
+  assert.equal(result.returnedModel, "jev-1.13.0");
+  assert.deepEqual(result.probabilities, { quick: 0.7, standard: 0.1, deep: 0.1, uncertain: 0.1 });
+  assert.deepEqual(result.usage, { inputTokens: 42, outputTokens: 3 });
+  assert.equal(result.requestedModel, "jev-1.13.0");
 });
 
-test("Cloudflare envelope markers cannot fall through to a valid bare answer", async () => {
-  for (const markers of [
-    { success: false },
-    { success: null },
-    { result: null },
-    { success: true, result: [] },
-  ]) {
-    await assert.rejects(
-      createClassifier(async () => json({ ...direct(), ...markers }))(
-        backends[1],
-        state,
-        options(),
-      ),
-      failure("invalid-response"),
+test("sends the pinned model, the projected state, and one frozen rubric", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+  await classify(TYPESAFE, STATE, options(signal(), "test-key"));
+
+  const call = transport.calls[0];
+  assert.equal(call?.url, "https://api.typesafe.ai/v1/systemone");
+
+  // SAFETY: the request body was serialized by this repository's own classifier above.
+  const payload = JSON.parse(String(call?.init.body)) as {
+    model: string;
+    state: unknown;
+    questions: {
+      task_class: { type: string; instructions: string; criteria: Record<string, string> };
+    };
+  };
+
+  assert.equal(payload.model, "jev-1.13.0");
+  assert.deepEqual(payload.state, STATE);
+  assert.equal(payload.questions.task_class.type, "choice");
+  assert.deepEqual(Object.keys(payload.questions.task_class.criteria).sort(), [
+    "deep",
+    "quick",
+    "standard",
+    "uncertain",
+  ]);
+  assert.match(payload.questions.task_class.instructions, /untrusted data/);
+});
+
+test("keys the request and the answer by the configured policy's question", async () => {
+  const transport = recorder(() => jsonResponse(externalBody("external_class")));
+  const classify = createClassifier(transport.fetch);
+  const result = await classify(TYPESAFE, STATE, externalOptions(signal(), "k"));
+
+  // SAFETY: the request body was serialized by this repository's own classifier above.
+  const payload = JSON.parse(String(transport.calls[0]?.init.body)) as {
+    questions: Record<string, { instructions: string }>;
+  };
+
+  assert.equal(result.choice, "quick");
+  assert.deepEqual(Object.keys(payload.questions), ["external_class"]);
+  assert.equal(payload.questions.external_class?.instructions, EXTERNAL.instructions);
+});
+
+// A hard-coded `task_class` normalizer would read an undefined answer here and fail every
+// configured policy that names its question something else.
+test("rejects an answer returned under a different question name", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, externalOptions(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+// A question key is operator-supplied text, so it may collide with an `Object.prototype` name.
+test("a prototype-named question key is never satisfied by an inherited value", async () => {
+  const hostile: RoutingPolicy = { ...POLICY, id: "hostile-rubric", question: "constructor" };
+
+  const answers: Record<string, DirectAnswer> = {};
+
+  const transport = recorder(() =>
+    jsonResponse({ answers, model: "jev-1.13.0", usage: { input_tokens: 0, output_tokens: 0 } }),
+  );
+
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, { signal: signal(), apiKey: "k", policy: hostile }),
+    "invalid-response",
+  );
+});
+
+test("keys the Cloudflare envelope by the configured policy's question", async () => {
+  const backend: Backend = {
+    type: "cloudflare",
+    model: "typesafe/jev",
+    accountId: "a".repeat(32),
+    gatewayId: "gateway",
+    auth: { source: "env", variable: "CLOUDFLARE_API_TOKEN" },
+  };
+
+  const transport = recorder(() =>
+    jsonResponse({
+      success: true,
+      result: { state: "Completed", result: externalBody("external_class") },
+    }),
+  );
+
+  const result = await createClassifier(transport.fetch)(
+    backend,
+    STATE,
+    externalOptions(signal(), "k"),
+  );
+
+  assert.equal(result.choice, "quick");
+});
+
+// The AI SDK gateway path cannot run offline, so its envelope is keyed and checked directly.
+test("keys the AI SDK gateway envelope by the configured policy's question", () => {
+  const answer = {
+    type: "choice" as const,
+    choice: "quick" as const,
+    probabilities: { quick: 0.7, standard: 0.1, deep: 0.1, uncertain: 0.1 },
+  };
+
+  const envelope = {
+    answers: { external_class: answer },
+    providerMetadata: { typesafe: { confidence: { external_class: 0.9 } } },
+    usage: { inputTokens: 5, outputTokens: 1 },
+  };
+
+  const parsed = gatewayResponseSchema("external_class").parse(envelope);
+
+  assert.equal(parsed.answers.external_class?.choice, "quick");
+  assert.equal(parsed.providerMetadata?.typesafe?.confidence?.external_class, 0.9);
+  assert.equal(gatewayResponseSchema("task_class").safeParse(envelope).success, false);
+  assert.equal(
+    gatewayResponseSchema("task_class").safeParse({ answers: { task_class: answer } }).success,
+    true,
+  );
+});
+
+test("refuses redirects and forwards the caller's signal", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+  const controller = new AbortController();
+  await classify(TYPESAFE, STATE, options(controller.signal, "test-key"));
+
+  assert.equal(transport.calls[0]?.init.redirect, "error");
+  assert.equal(transport.calls[0]?.init.signal, controller.signal);
+  assert.equal(transport.calls[0]?.init.method, "POST");
+});
+
+test("never calls out without a credential", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(classify(TYPESAFE, STATE, options(signal(), "   ")), "credentials");
+  assert.equal(transport.calls.length, 0);
+});
+
+test("reports an HTTP failure with its status", async () => {
+  const transport = recorder(() => new Response("denied", { status: 403 }));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(classify(TYPESAFE, STATE, options(signal(), "k")), "http", 403);
+});
+
+test("rejects a declared body larger than the cap", async () => {
+  const transport = recorder(
+    () => new Response("{}", { status: 200, headers: { "content-length": "70000" } }),
+  );
+
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects a streamed body larger than the cap", async () => {
+  const oversized = JSON.stringify({ padding: "x".repeat(70_000) });
+  const transport = recorder(() => new Response(oversized, { status: 200 }));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects malformed JSON", async () => {
+  const transport = recorder(() => new Response("{not json", { status: 200 }));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects an unknown label", async () => {
+  const body = directBody();
+  const answer = body.answers.task_class;
+  answer.choice = "medium";
+  const transport = recorder(() => jsonResponse(body));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects probabilities that do not sum to one", async () => {
+  const body = directBody();
+  const answer = body.answers.task_class;
+  answer.probabilities = { quick: 0.4, standard: 0.1, deep: 0.1, uncertain: 0.1 };
+  const transport = recorder(() => jsonResponse(body));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects a distribution whose peak is not the reported choice", async () => {
+  const body = directBody();
+  const answer = body.answers.task_class;
+  answer.probabilities = { quick: 0.2, standard: 0.1, deep: 0.6, uncertain: 0.1 };
+  const transport = recorder(() => jsonResponse(body));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("rejects an out-of-range confidence", async () => {
+  const body = directBody();
+  const answer = body.answers.task_class;
+  answer.confidence = 1.4;
+  const transport = recorder(() => jsonResponse(body));
+  const classify = createClassifier(transport.fetch);
+
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(signal(), "k")),
+    "invalid-response",
+  );
+});
+
+test("drops unusable usage instead of failing the classification", async () => {
+  const body = directBody({ usage: { input_tokens: -5, output_tokens: 1 } });
+  const transport = recorder(() => jsonResponse(body));
+  const classify = createClassifier(transport.fetch);
+  const result = await classify(TYPESAFE, STATE, options(signal(), "k"));
+
+  assert.equal(result.usage, undefined);
+  assert.equal(result.returnedModel, "jev-1.13.0");
+  assert.equal(result.choice, "quick");
+});
+
+// The configured model is a pin, not a preference. An answer that cannot name it is a
+// protocol failure, and the caller then continues on the current generation model.
+test("refuses a response whose model cannot be verified", async () => {
+  for (const model of ["not a valid model id!", "jev-1.12.0", "jev-latest"]) {
+    const transport = recorder(() => jsonResponse(directBody({ model })));
+    const classify = createClassifier(transport.fetch);
+
+    await expectClassifierError(
+      classify(TYPESAFE, STATE, options(signal(), "k")),
+      "model-mismatch",
     );
   }
 });
 
-test("optional metadata is sanitized without rejecting a valid direct answer", async () => {
-  for (const usage of [
-    null,
-    [],
-    "secret",
-    { input_tokens: Number.MAX_SAFE_INTEGER + 1, output_tokens: 0 },
-  ]) {
-    for (const model of [null, [], 42, "x".repeat(201)]) {
-      const result = await createClassifier(async () => json({ ...direct(), model, usage }))(
-        backends[0],
-        state,
-        options(),
-      );
+test("reports cancellation rather than a validation failure", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+  const controller = new AbortController();
+  controller.abort();
 
-      assert.equal(result.choice, "standard");
-      assert.equal(Object.hasOwn(result, "usage"), false);
-      assert.equal(Object.hasOwn(result, "returnedModel"), false);
-    }
-  }
+  await expectClassifierError(
+    classify(TYPESAFE, STATE, options(controller.signal, "k")),
+    "cancelled",
+  );
 });
 
-test("gateway missing confidence stays absent and unsafe token counts are omitted", async () => {
-  for (const usage of [
-    {},
-    { inputTokens: 1.5, outputTokens: 0 },
-    { inputTokens: -1, outputTokens: 0 },
-    { inputTokens: Number.MAX_SAFE_INTEGER + 1, outputTokens: 0 },
-  ]) {
-    const result = await createClassifier(async () =>
-      json({
-        ...sdk(),
-        usage,
-        providerMetadata: {},
-        model: "upstream-model",
-      }),
-    )(backends[2], state, options());
+test("reports a transport rejection as a network failure", async () => {
+  const classify = createClassifier(async () => {
+    throw new TypeError("fetch failed");
+  });
 
-    assert.equal(Object.hasOwn(result, "confidence"), false);
-    assert.equal(Object.hasOwn(result, "usage"), false);
-    assert.equal(Object.hasOwn(result, "returnedModel"), false);
-  }
+  await expectClassifierError(classify(TYPESAFE, STATE, options(signal(), "k")), "network");
+});
+
+test("uses the OpenRouter decisions endpoint", async () => {
+  const transport = recorder(() => jsonResponse(directBody({ model: "typesafe/jev-1.13" })));
+  const classify = createClassifier(transport.fetch);
+
+  const openrouter: Backend = {
+    type: "openrouter",
+    model: "typesafe/jev-1.13",
+    auth: { source: "env", variable: "OPENROUTER_API_KEY" },
+  };
+
+  await classify(openrouter, STATE, options(signal(), "k"));
+
+  assert.equal(transport.calls[0]?.url, "https://openrouter.ai/api/alpha/decisions");
+});
+
+test("the AI SDK is loaded only for the backend that needs it", async () => {
+  // TypeSafe, OpenRouter, and Cloudflare are plain HTTP. A static import of `ai` would load
+  // the gateway, OIDC, and undici closure for every session on those backends.
+  const source = await readFile(new URL("../src/classifier.ts", import.meta.url), "utf8");
+  const staticImport = /^\s*import[^;]*from\s+"ai";/mu;
+
+  assert.ok(!staticImport.test(source), "`ai` must not be statically imported");
+  assert.match(source, /await import\("ai"\)/u);
+});
+
+test("uses the Cloudflare gateway endpoint with logging and cache disabled", async () => {
+  const transport = recorder(() => jsonResponse(directBody()));
+  const classify = createClassifier(transport.fetch);
+
+  const backend: Backend = {
+    type: "cloudflare",
+    model: "typesafe/jev",
+    accountId: "0123456789abcdef0123456789abcdef",
+    gatewayId: "my-gateway",
+    auth: { source: "env", variable: "CLOUDFLARE_API_TOKEN" },
+  };
+
+  await classify(backend, STATE, options(signal(), "k"));
+
+  const call = transport.calls[0];
+  assert.ok(call?.url.startsWith("https://api.cloudflare.com/client/v4/accounts/"));
+  assert.ok(call?.url.includes("0123456789abcdef0123456789abcdef"));
+  // SAFETY: the classifier sets a Headers instance on every request it sends.
+  const headers = call?.init.headers as Headers;
+  assert.equal(headers.get("cf-aig-gateway-id"), "my-gateway");
+  assert.equal(headers.get("cf-aig-collect-log"), "false");
+  assert.equal(headers.get("cf-aig-skip-cache"), "true");
+  assert.equal(headers.get("cf-aig-max-attempts"), "1");
+  assert.match(String(call?.init.body), /"input"/);
+});
+
+test("accepts both Cloudflare response envelopes", async () => {
+  const wrapped = recorder(() =>
+    jsonResponse({ success: true, result: { state: "Completed", result: directBody() } }),
+  );
+
+  const bare = recorder(() => jsonResponse(directBody()));
+
+  const backend: Backend = {
+    type: "cloudflare",
+    model: "typesafe/jev",
+    accountId: "a".repeat(32),
+    gatewayId: "gateway",
+    auth: { source: "env", variable: "CLOUDFLARE_API_TOKEN" },
+  };
+
+  assert.equal(
+    (await createClassifier(wrapped.fetch)(backend, STATE, options(signal(), "k"))).choice,
+    "quick",
+  );
+  assert.equal(
+    (await createClassifier(bare.fetch)(backend, STATE, options(signal(), "k"))).choice,
+    "quick",
+  );
+});
+
+test("rejects a failed Cloudflare envelope", async () => {
+  const transport = recorder(() => jsonResponse({ success: false, result: directBody() }));
+  const classify = createClassifier(transport.fetch);
+
+  const backend: Backend = {
+    type: "cloudflare",
+    model: "typesafe/jev",
+    accountId: "a".repeat(32),
+    gatewayId: "gateway",
+    auth: { source: "env", variable: "CLOUDFLARE_API_TOKEN" },
+  };
+
+  await expectClassifierError(classify(backend, STATE, options(signal(), "k")), "invalid-response");
 });

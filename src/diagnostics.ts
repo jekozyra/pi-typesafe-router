@@ -12,6 +12,11 @@ export interface EvaluationResult {
   classification?: Classification;
   reason: string;
   failure?: { code: ClassifierFailureCode | "unavailable"; status?: number };
+  /**
+   * Size of what was projected to the classifier, as counts only. The projected text itself
+   * never leaves this scope, and a decision entry records only these two numbers.
+   */
+  projection?: { characters: number; historyMessages: number };
 }
 
 export function runtimeLines(
@@ -72,7 +77,7 @@ export function routeLines(
           ? ""
           : `; not routable: ${candidateReasons.get(candidate.reason ?? "") ?? candidate.reason ?? "ineligible; no reason supplied"}`;
 
-        return `    ${key}\n    ${outcome}${restriction}`;
+        return `    ${key} (thinking: ${candidate.target.thinking})\n    ${outcome}${restriction}`;
       }),
     ]),
   ];
@@ -129,6 +134,10 @@ export function classifierLines(result: EvaluationResult, elapsedMs: number, con
     case "invalid-response":
       action =
         "the response did not match the supported classifier protocol; verify the configured model and backend compatibility";
+      break;
+    case "model-mismatch":
+      action =
+        "the classifier answered with a different model than the configured pin; confirm the configured model ID is current for this backend before trusting a route";
       break;
     default:
       action =

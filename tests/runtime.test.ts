@@ -1,1720 +1,1635 @@
+/**
+ * Lifecycle tests for `registerRouter` in `src/index.ts`.
+ *
+ * `registerRouter` takes its classifier, generation probe, and config loader as arguments,
+ * so the extension's own host seam is enough to drive the real hook wiring offline: no Pi
+ * process, no credentials, no socket. The suite covers the *contract* gates — which
+ * submissions are routed, which continue untouched, what gets probed, what a session
+ * replays, and what a manual model change does — rather than trying to re-render the TUI.
+ *
+ * The fakes are typed against the extension's own `RouterAPI` / `RouterContext`, so a change
+ * to that seam fails here rather than in a live session.
+ */
+
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setImmediate as nextTurn } from "node:timers/promises";
-import { describe, it } from "node:test";
-import {
-  estimateTokens,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type InputEvent,
-} from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import test from "node:test";
+
 import { z } from "zod";
 
-import {
-  registerRouter,
-  type RouterAPI,
-  type RouterContext,
-  type RouterEvents,
-} from "../src/index.ts";
-import type { probeGeneration } from "../src/generation-probe.ts";
-import { parseConfig } from "../src/config.ts";
-import { loadConfig } from "../src/settings.ts";
-import {
-  ClassifierError,
-  type Classification,
-  type Classify,
-  type RouterConfig,
-} from "../src/types.ts";
+import { baseConfigInput, installPiStubs, model } from "./harness.ts";
 
-type RouterHookName = keyof RouterEvents;
+installPiStubs();
 
-type RouterResult = Awaited<ReturnType<Parameters<RouterAPI["on"]>[1]>>;
+const { registerRouter } = await import("../src/index.ts");
 
-type RouterHook<K extends RouterHookName> = (
-  event: RouterEvents[K],
-  ctx: RouterContext,
-) => RouterResult | Promise<RouterResult>;
+const { parseConfig } = await import("../src/config.ts");
 
-type HookLists = { [K in RouterHookName]: RouterHook<K>[] };
+const { configuredTargets } = await import("../src/verification.ts");
 
-const SECRET = "synthetic-auth-marker-not-a-real-key";
+const { ClassifierError } = await import("../src/types.ts");
 
-const PROMPT = "Private prompt marker: explain the event loop and its scheduling.";
+import type { InputEventResult, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { RouterAPI, RouterContext, RouterEvents } from "../src/host.ts";
+import type { Classification, Classify, RouterConfig, Target, TaskClass } from "../src/types.ts";
+import type { GenerationProbeResult } from "../src/generation-probe.ts";
+import type { RoutingPolicy } from "../src/policy.ts";
 
-const target = (model: string) => ({ provider: "fixture", model });
+const NAME = "typesafe-router";
 
-const model = (id: string): Model<Api> => ({
-  name: id,
-  api: "openai-completions",
-  baseUrl: "https://fixture.invalid",
-  reasoning: false,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  provider: "fixture",
-  id,
-  input: ["text", "image"],
-  contextWindow: 128_000,
-  maxTokens: 16_384,
-});
+const CONFIG_PATH = "/tmp/typesafe-router-tests.json";
 
-const classification = (overrides: Partial<Classification> = {}): Classification => ({
-  choice: "quick",
-  confidence: 0.99,
-  probabilities: { quick: 0.99, standard: 0.005, deep: 0.005, uncertain: 0 },
-  requestedModel: "jev-1.13.0",
-  ...overrides,
-});
+type TerminalHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
-const config = (overrides: Partial<RouterConfig> = {}) =>
-  parseConfig({
-    mode: "auto",
-    backend: { type: "typesafe", auth: { source: "pi", provider: "fixture" } },
-    routes: { quick: [target("quick")], standard: [target("standard")], deep: [target("deep")] },
-    defaultRoute: "standard",
-    uncertainRoute: "deep",
-    ...overrides,
-  });
+/** Pi's own custom-entry payload type, named so the fake does not assert it. */
+type CustomEntryData = Extract<SessionEntry, { type: "custom" }>["data"];
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
+/** What a hook may return to the host: an input decision, a cancellation, or nothing. */
+type FakeResult = InputEventResult | { cancel?: boolean } | void;
 
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-
-  return { promise, resolve };
+/**
+ * The event a test supplies for one hook. Only `type` is required, because each test drives a
+ * single hook with the fields that hook reads; the router never validates its host's events.
+ */
+interface FakeEvent {
+  type: string;
 }
 
-// Preserve extra persisted fields so privacy assertions also inspect unexpected data.
-const entrySchema = z.discriminatedUnion("type", [
-  z.looseObject({
-    type: z.literal("typesafe-router-mode"),
-    data: z.looseObject({ mode: z.enum(["off", "shadow", "auto"]) }),
-  }),
-  z.looseObject({
-    type: z.literal("typesafe-router-decision"),
-    data: z.looseObject({
-      route: z.enum(["quick", "standard", "deep"]),
-      target: z.looseObject({ provider: z.string(), model: z.string() }).optional(),
-      reason: z.string(),
-      skipped: z.array(z.string()),
-      backend: z.string(),
-      milliseconds: z.number(),
-      shadow: z.boolean(),
-    }),
-  }),
-  z.looseObject({
-    type: z.literal("typesafe-router-verification"),
-    data: z.discriminatedUnion("verified", [
-      z.object({ verified: z.literal(false) }),
-      z.object({
-        verified: z.literal(true),
-        fingerprint: z.string(),
-        passed: z.array(z.string()),
-        checkedAt: z.string(),
-      }),
-    ]),
-  }),
-]);
+/** The erased hook shape the double stores; a specific hook is assignable to it. */
+type ErasedHook = (event: FakeEvent, ctx: RouterContext) => FakeResult | Promise<FakeResult>;
 
-function unusedHostMethod(): never {
-  throw new Error("Unexpected host method used by router");
+interface FakeHost {
+  api: RouterAPI;
+  entries: Array<{ customType: string; data?: CustomEntryData }>;
+  has(command: string): boolean;
+  hasHook(name: string): boolean;
+  fire<E extends FakeEvent>(name: string, event: E, ctx: RouterContext): Promise<FakeResult>;
+  fireCommand(args: string, ctx: RouterContext): Promise<void>;
+  /** Deliver terminal input to whatever handler the router currently holds, if any. */
+  terminal(data: string): { consume?: boolean; data?: string } | undefined;
+  hasTerminalHandler(): boolean;
 }
 
-type TerminalHook = Parameters<ExtensionContext["ui"]["onTerminalInput"]>[0];
+function fakeHost(
+  selection: { results: boolean[]; models: string[]; thinking: string[] },
+  terminalHandlers: Set<TerminalHandler>,
+): FakeHost {
+  const hooks = new Map<string, ErasedHook>();
 
-interface Options {
-  unverified?: boolean;
-  probeGeneration?: typeof probeGeneration;
-  config?: RouterConfig;
-  configPath?: string;
-  load?: (path: string) => Promise<RouterConfig | undefined>;
-  classify?: Classify;
-  setModel?: RouterAPI["setModel"];
-  models?: Model<Api>[];
-  available?: Model<Api>[];
-  mode?: "tui" | "rpc";
-  idle?: boolean;
-  confirm?: RouterContext["ui"]["confirm"];
-  select?: RouterContext["ui"]["select"];
-  getContextUsage?: RouterContext["getContextUsage"];
-}
+  const commands = new Map<
+    string,
+    { handler: (args: string, ctx: RouterContext) => Promise<void> }
+  >();
 
-/** Only the host boundary is synthetic. Routing, config parsing and cancellation are real. */
-async function harness(options: Options = {}) {
-  const hooks: HookLists = {
-    session_start: [],
-    session_shutdown: [],
-    session_before_switch: [],
-    session_before_fork: [],
-    session_before_tree: [],
-    session_tree: [],
-    input: [],
-    model_select: [],
-    message_end: [],
-    agent_settled: [],
-  };
+  const entries: FakeHost["entries"] = [];
 
-  const commands = new Map<string, (args: string, ctx: RouterContext) => Promise<void>>();
-  const terminal = new Set<TerminalHook>();
-  const selections: string[] = [];
-  const classifications: Parameters<Classify>[] = [];
-  const entries: z.infer<typeof entrySchema>[] = [];
-  const notifications: string[] = [];
-  const sent: Parameters<ExtensionAPI["sendUserMessage"]>[] = [];
-  const statuses: Parameters<ExtensionContext["ui"]["setStatus"]>[] = [];
+  async function fire<E extends FakeEvent>(
+    name: string,
+    event: E,
+    ctx: RouterContext,
+  ): Promise<FakeResult> {
+    const hook = hooks.get(name);
+    assert.ok(hook, `${name} hook is registered`);
 
-  const widgets: [
-    key: string,
-    content: string[] | Parameters<ExtensionContext["ui"]["setWidget"]>[1],
-    options?: Parameters<ExtensionContext["ui"]["setWidget"]>[2],
-  ][] = [];
-
-  const models = options.models ?? [
-    model("quick"),
-    model("standard"),
-    model("deep"),
-    model("next"),
-  ];
-
-  let initialized = false;
-  let warming = false;
-  let firstConfig: RouterConfig | undefined;
-  const probes: Parameters<typeof probeGeneration>[] = [];
-
-  const ctx: RouterContext = {
-    mode: options.mode ?? "tui",
-    hasUI: true,
-    scopedModels: [],
-    model: models[0],
-    // Pi starts the extension before a run; busy-input scenarios begin afterward.
-    isIdle: () => !initialized || (options.idle ?? true),
-    getSystemPrompt: () => "Synthetic system prompt",
-    getContextUsage:
-      options.getContextUsage ?? (() => ({ tokens: 0, contextWindow: 128_000, percent: 0 })),
-    sessionManager: {
-      getEntries: () => [],
-      getLeafId: () => null,
-      buildContextEntries: () => [],
-      getBranch: () => {
-        const branch = entries.map((entry) => ({
-          type: "custom" as const,
-          customType: entry.type,
-          data: entry.data,
-        }));
-
-        // SAFETY: the router only reads the custom entry fields supplied above.
-        return branch as never;
-      },
-    },
-    modelRegistry: {
-      getAll: () => models,
-      getAvailable: () => options.available ?? models,
-      find: (provider: string, id: string) =>
-        models.find((item) => item.provider === provider && item.id === id),
-      getProviderAuth: async () => ({ auth: { apiKey: SECRET } }),
-      getProviderAuthStatus: () => ({ configured: true, source: "runtime" }),
-      getRegisteredProviderConfig: () => ({ apiKey: SECRET }),
-      getProvider: () => undefined,
-      complete: unusedHostMethod,
-    },
-    ui: {
-      select: options.select ?? unusedHostMethod,
-      input: unusedHostMethod,
-      notify: (text) => {
-        notifications.push(text);
-      },
-      setStatus: (...args) => {
-        statuses.push(args);
-      },
-      setWidget: (...args) => {
-        widgets.push(args);
-      },
-      confirm: options.confirm ?? (async () => true),
-      onTerminalInput: (handler: TerminalHook) => {
-        terminal.add(handler);
-
-        return () => {
-          terminal.delete(handler);
-        };
-      },
-    },
-  };
-
-  const defaults: RouterEvents = {
-    session_start: { type: "session_start", reason: "startup" },
-    session_shutdown: { type: "session_shutdown", reason: "quit" },
-    session_before_switch: { type: "session_before_switch", reason: "new" },
-    session_before_fork: { type: "session_before_fork", entryId: "fixture-entry", position: "at" },
-    session_before_tree: {
-      type: "session_before_tree",
-      preparation: {
-        targetId: "fixture-entry",
-        oldLeafId: null,
-        commonAncestorId: null,
-        entriesToSummarize: [],
-        userWantsSummary: false,
-      },
-      signal: new AbortController().signal,
-    },
-    session_tree: { type: "session_tree", newLeafId: null, oldLeafId: null },
-    input: { type: "input", text: PROMPT, source: "interactive", images: [] },
-    model_select: {
-      type: "model_select",
-      model: model("quick"),
-      previousModel: undefined,
-      source: "set",
-    },
-    message_end: { type: "message_end", message: { role: "assistant" } },
-    agent_settled: { type: "agent_settled" },
-  };
-
-  async function emit<K extends RouterHookName>(name: K, event: Partial<RouterEvents[K]> = {}) {
-    let result: RouterResult = undefined;
-    const payload = { ...defaults[name], ...event };
-
-    for (const hook of hooks[name]) result = await hook(payload, ctx);
-
-    return result;
+    return await hook(event, ctx);
   }
 
-  const pi: RouterAPI = {
-    on: (name, hook) => {
-      hooks[name].push(hook);
-    },
-    registerCommand: (name, command) => {
-      commands.set(name, command.handler);
-    },
-    appendEntry: (type, data) => {
-      entries.push(entrySchema.parse({ type, data }));
+  async function fireCommand(args: string, ctx: RouterContext): Promise<void> {
+    const command = commands.get(NAME);
+    assert.ok(command, "the router command is registered");
+    await command.handler(args, ctx);
+  }
+
+  const api = {
+    appendEntry: (customType: string, data?: CustomEntryData) => {
+      entries.push({ customType, data });
     },
     getAllTools: () => [],
     getActiveTools: () => [],
-    sendUserMessage: (...args) => {
-      sent.push(args);
+    sendUserMessage: () => {},
+    setModel: async (selected: { provider: string; id: string }) => {
+      selection.models.push(`${selected.provider}/${selected.id}`);
+
+      return selection.results.shift() ?? true;
     },
-    setModel: async (selected) => {
-      selections.push(selected.id);
-      const success = await (options.setModel?.(selected) ?? Promise.resolve(true));
-
-      // Pi emits this before its setter resolves; router-owned selections must not disable auto.
-      if (success) await emit("model_select", { model: selected, source: "set" });
-
-      return success;
+    setThinkingLevel: (level: string) => {
+      selection.thinking.push(level);
     },
-  };
-
-  registerRouter(pi, {
-    configPath: options.configPath ?? "/synthetic/no-filesystem/router.json",
-    load: async (requestedPath) => {
-      if (warming) return firstConfig;
-
-      const loaded = await (options.load?.(requestedPath) ??
-        Promise.resolve(options.config ?? config()));
-
-      if (!initialized) firstConfig = loaded;
-
-      return loaded;
+    on: <K extends keyof RouterEvents & string>(
+      name: K,
+      hook: (event: RouterEvents[K], ctx: RouterContext) => FakeResult | Promise<FakeResult>,
+    ) => {
+      // SAFETY: the store is erased across hook names; a hook always accepts its own event,
+      // and every call site fires a hook with the event that hook declares.
+      hooks.set(name, hook as ErasedHook);
     },
-    probeGeneration: async (...args) => {
-      if (!warming) probes.push(args);
-
-      return !warming && options.probeGeneration
-        ? options.probeGeneration(...args)
-        : { target: args[1], passed: true, reason: "ok", milliseconds: 0 };
+    registerCommand: (
+      name: string,
+      command: { handler: (args: string, ctx: RouterContext) => Promise<void> },
+    ) => {
+      commands.set(name, command);
     },
-    classify: async (...args) => {
-      if (warming) return classification();
-      classifications.push(args);
-
-      return options.classify ? options.classify(...args) : classification();
-    },
-  });
-  await emit("session_start");
-
-  if (!options.unverified && firstConfig) {
-    warming = true;
-    await commands.get("typesafe-router")!("doctor", ctx);
-    warming = false;
-    entries.length = 0;
-    notifications.length = 0;
-    statuses.length = 0;
-    widgets.length = 0;
-    selections.length = 0;
-  }
-
-  initialized = true;
+  } satisfies RouterAPI;
 
   return {
-    ctx,
-    probes,
-    emit,
-    selections,
-    classifications,
+    api,
     entries,
-    notifications,
-    sent,
-    statuses,
-    widgets,
-    terminal,
-    input: (overrides: Partial<InputEvent> = {}) =>
-      emit("input", { text: PROMPT, source: "interactive", images: [], ...overrides }),
-    command: (args: string) => commands.get("typesafe-router")!(args, ctx),
-    escape: () => [...terminal].map((handler) => handler("\u001b")),
-    decisions: () =>
-      entries.flatMap((entry) => (entry.type === "typesafe-router-decision" ? [entry.data] : [])),
+    has: (command) => commands.has(command),
+    hasHook: (name) => hooks.has(name),
+    fire,
+    fireCommand,
+    terminal: (data) => {
+      for (const handler of terminalHandlers) {
+        const result = handler(data);
+
+        if (result) return result;
+      }
+
+      return undefined;
+    },
+    hasTerminalHandler: () => terminalHandlers.size > 0,
   };
 }
 
-// A hung regression should fail quickly rather than leave a pending test indefinitely.
-describe("registerRouter runtime hooks", { timeout: 3000 }, () => {
-  it("off does not classify or select", async () => {
-    const h = await harness({ config: config({ mode: "off" }) });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-  });
+interface ContextOptions {
+  mode?: RouterContext["mode"];
+  hasUI?: boolean;
+  branch?: SessionEntry[];
+  model?: RouterContext["model"];
+  idle?: boolean;
+  catalog?: ReturnType<typeof model>[];
+}
 
-  it("headless opts out by default, even with a UI facade", async () => {
-    const h = await harness({ mode: "rpc" });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-  });
+interface FakeSession {
+  ctx: RouterContext;
+  notifications: string[];
+  statuses: Array<string | undefined>;
+  editorTexts: string[];
+  setIdle(value: boolean): void;
+}
 
-  it("explicit allowHeadless permits routing", async () => {
-    const h = await harness({ mode: "rpc", config: config({ allowHeadless: true }) });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.equal(h.terminal.size, 0);
-  });
+function context(
+  options: ContextOptions,
+  terminalHandlers: Set<TerminalHandler>,
+  liveBranch?: () => SessionEntry[],
+): FakeSession {
+  const notifications: string[] = [];
+  const statuses: Array<string | undefined> = [];
+  const editorTexts: string[] = [];
+  let idle = options.idle ?? true;
+  const branch = options.branch ?? [];
+  const catalog = options.catalog ?? [];
 
-  for (const [name, event] of [
-    ["steering", { streamingBehavior: "steer" }],
-    ["follow-up", { streamingBehavior: "followUp" }],
-    ["extension", { source: "extension" }],
-  ] as const)
-    it(`skips ${name} inputs`, async () => {
-      const h = await harness();
-      assert.deepEqual(await h.input(event), { action: "continue" });
-      assert.equal(h.classifications.length, 0);
-      assert.deepEqual(h.selections, []);
-    });
+  // Pi composes one provider object per provider id; the fake must too, or every
+  // fingerprint would be recomputed against a fresh identity.
+  const providerObjects = new Map<
+    string,
+    NonNullable<ReturnType<RouterContext["modelRegistry"]["getProvider"]>>
+  >();
 
-  it("skips inputs while the agent is not idle", async () => {
-    const h = await harness({ idle: false });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-  });
+  const ctx: RouterContext = {
+    mode: options.mode ?? "tui",
+    hasUI: options.hasUI ?? true,
+    scopedModels: [],
+    model: options.model ?? model("provider-quick", "quick-model"),
+    isIdle: () => idle,
+    getSystemPrompt: () => "",
+    getContextUsage: () => ({ tokens: 100, contextWindow: 200_000, percent: 0.05 }),
+    sessionManager: {
+      getEntries: () => liveBranch?.() ?? branch,
+      getBranch: () => liveBranch?.() ?? branch,
+      buildContextEntries: () => [],
+      getLeafId: () => null,
+    },
+    modelRegistry: {
+      getAll: () => catalog,
+      getAvailable: () => catalog,
+      find: (provider, id) =>
+        catalog.find((entry) => entry.provider === provider && entry.id === id),
+      getProviderAuth: async () => undefined,
+      getProviderAuthStatus: () => ({ configured: true, source: "environment" as const }),
+      getRegisteredProviderConfig: () => undefined,
+      getProvider: (provider) => {
+        const existing = providerObjects.get(provider);
 
-  for (const [name, result] of [
-    ["uncertain", { choice: "uncertain" }],
-    ["missing confidence", { confidence: undefined }],
-    ["low confidence", { confidence: 0.2 }],
-    ["nonfinite confidence", { confidence: NaN }],
-  ] as const)
-    it(`${name} chooses the conservative route, not the default`, async () => {
-      const h = await harness({ classify: async () => classification(result) });
-      assert.deepEqual(await h.input(), { action: "continue" });
-      assert.deepEqual(h.selections, ["deep"]);
-      assert.equal(h.decisions()[0].route, "deep");
-    });
+        if (existing) return existing;
 
-  it("classifier errors use the default chain without persisting error text", async () => {
-    const h = await harness({
-      classify: async () => {
-        throw new Error(`${SECRET} ${PROMPT}`);
+        // SAFETY: this fake exists to be a stable object identity; no provider member is read.
+        // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- identity-only fake provider
+        const created = { id: provider } as unknown as NonNullable<
+          ReturnType<RouterContext["modelRegistry"]["getProvider"]>
+        >;
+
+        providerObjects.set(provider, created);
+
+        return created;
       },
-    });
-
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["standard"]);
-    assert.equal(h.decisions()[0].route, "standard");
-    assert.ok(!JSON.stringify([h.entries, h.notifications]).includes(SECRET));
-    assert.ok(!JSON.stringify([h.entries, h.notifications]).includes(PROMPT));
-  });
-
-  it("classifier timeout aborts its signal and uses the default chain; late success is ignored", async () => {
-    const pending = deferred<Classification>();
-
-    const h = await harness({
-      config: config({ timeoutMs: 100 }),
-      classify: () => pending.promise,
-    });
-
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications[0][2].signal.aborted, true);
-    assert.deepEqual(h.selections, ["standard"]);
-    assert.equal(h.decisions()[0].reason, "classifier-timeout");
-    pending.resolve(classification());
-    await nextTurn();
-    assert.deepEqual(h.selections, ["standard"]);
-  });
-
-  it("missing, ineligible, auth-false and throwing candidates fall through in order before generation", async () => {
-    const h = await harness({
-      config: config({
-        routes: {
-          quick: ["missing", "tiny", "noauth", "throws", "next"].map(target),
-          standard: [target("standard")],
-          deep: [target("deep")],
-        },
-      }),
-      models: [
-        { ...model("tiny"), contextWindow: 1 },
-        model("noauth"),
-        model("throws"),
-        model("next"),
-        model("standard"),
-        model("deep"),
-      ],
-      setModel: async (selected) => {
-        if (selected.id === "noauth") return false;
-
-        if (selected.id === "throws") throw new Error("synthetic auth failure");
-
-        return true;
+      complete: async () => {
+        throw new Error("no model is contacted by this suite");
       },
-    });
-
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["noauth", "throws", "next"]);
-    assert.equal(h.decisions()[0].target?.model, "next");
-    assert.equal(h.decisions()[0].skipped.length, 4);
-    assert.deepEqual(h.sent, []);
-  });
-
-  it("uses Pi's 210000-token count for an Astra-sized model despite huge session messages", async () => {
-    const h = await harness({
-      config: config({
-        routes: { quick: [target("quick")], standard: [target("quick")], deep: [target("quick")] },
-      }),
-      models: [{ ...model("quick"), contextWindow: 272_000 }],
-      getContextUsage: () => ({ tokens: 210_000, contextWindow: 272_000, percent: 77.2 }),
-    });
-
-    h.ctx.sessionManager.getEntries = () => [
-      {
-        type: "message",
-        id: "huge-message",
-        parentId: null,
-        timestamp: new Date(0).toISOString(),
-        message: { role: "user", content: "漢".repeat(300_000), timestamp: 0 },
+    },
+    ui: {
+      notify: (message) => {
+        notifications.push(message);
       },
-    ];
-    h.ctx.sessionManager.getLeafId = () => "huge-message";
-
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.equal(h.decisions()[0].target?.model, "quick");
-  });
-
-  it("counts the actual pending request exactly once at the host usage boundary", async () => {
-    const text = "Explain é漢字👩🏽‍💻".repeat(20);
-    const pendingTokens = estimateTokens({ role: "user", content: text, timestamp: 0 });
-    assert.ok(pendingTokens > 0);
-
-    for (const extraToken of [0, 1]) {
-      const h = await harness({
-        config: config({
-          routes: {
-            quick: [target("quick")],
-            standard: [target("quick")],
-            deep: [target("quick")],
-          },
-        }),
-        models: [{ ...model("quick"), contextWindow: 210_000 + pendingTokens + 8192 }],
-        getContextUsage: () => ({
-          tokens: 210_000 + extraToken,
-          contextWindow: 272_000,
-          percent: 77.2,
-        }),
-      });
-
-      assert.deepEqual(await h.input({ text }), {
-        action: extraToken === 0 ? "continue" : "handled",
-      });
-      assert.deepEqual(h.selections, extraToken === 0 ? ["quick"] : []);
-
-      if (extraToken === 1)
-        assert.ok(h.decisions()[0].skipped.some((reason) => reason.includes("context-overflow")));
-    }
-  });
-
-  it("unknown post-compaction context does not falsely block a candidate", async () => {
-    const h = await harness({
-      config: config({
-        routes: { quick: [target("quick")], standard: [target("quick")], deep: [target("quick")] },
-      }),
-      models: [{ ...model("quick"), contextWindow: 1 }],
-      getContextUsage: () => ({ tokens: null, contextWindow: 272_000, percent: null }),
-    });
-
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["quick"]);
-  });
-
-  it("exhausted candidates handle the original input instead of generating", async () => {
-    const h = await harness({ setModel: async () => false });
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.decisions()[0].target, undefined);
-    assert.deepEqual(h.sent, []);
-  });
-
-  it("shadow classifies and records a decision but never sets a model", async () => {
-    const h = await harness({ config: config({ mode: "shadow" }) });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, []);
-    assert.equal(h.decisions()[0].shadow, true);
-  });
-
-  it("Escape consumes the key, aborts classification and handles the unsent prompt", async () => {
-    const entered = deferred<void>();
-    const pending = deferred<Classification>();
-
-    const h = await harness({
-      classify: () => {
-        entered.resolve();
-
-        return pending.promise;
+      setStatus: (_key, value) => {
+        statuses.push(value);
       },
-    });
-
-    const input = h.input();
-    await entered.promise;
-    assert.deepEqual(h.escape(), [{ consume: true }]);
-    assert.equal(h.classifications[0][2].signal.aborted, true);
-    assert.deepEqual(await input, { action: "handled" });
-    pending.resolve(classification());
-    await nextTurn();
-    assert.deepEqual(h.selections, []);
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
-  });
-
-  it("cancelled noncancellable setter keeps the lock until settlement", async () => {
-    const entered = deferred<void>();
-    const pending = deferred<boolean>();
-
-    const h = await harness({
-      setModel: () => {
-        entered.resolve();
-
-        return pending.promise;
+      setWidget: () => {},
+      setEditorText: (text) => {
+        editorTexts.push(text);
       },
-    });
+      confirm: async () => true,
+      select: async () => undefined,
+      input: async () => undefined,
+      onTerminalInput: (handler) => {
+        terminalHandlers.add(handler);
 
-    let settled = false;
-
-    const original = h.input().then((result) => {
-      settled = true;
-
-      return result;
-    });
-
-    await entered.promise;
-    h.escape();
-    assert.deepEqual(await h.input({ text: "Second submission" }), { action: "handled" });
-    assert.equal(settled, false);
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, ["quick"]);
-    pending.resolve(true);
-    assert.deepEqual(await original, { action: "handled" });
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
-    assert.deepEqual(h.sent, []);
-  });
-
-  it("router-owned model_select preserves auto, external model_select disables it", async () => {
-    const h = await harness();
-    await h.input();
-    await h.input();
-    assert.equal(h.classifications.length, 2);
-    await h.emit("model_select", { model: model("deep"), source: "cycle" });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 2);
-    assert.deepEqual(h.selections, ["quick", "quick"]);
-    assert.equal(
-      h.entries.filter((entry) => entry.type === "typesafe-router-mode").at(-1)?.data.mode,
-      "off",
-    );
-  });
-
-  it("generation failure guides manual /model recovery without replay or selection", async () => {
-    const h = await harness();
-    await h.input();
-    await h.emit("message_end", {
-      message: { role: "assistant", provider: "fixture", model: "quick", stopReason: "error" },
-    });
-    await h.emit("agent_settled");
-    assert.match(h.notifications.join("\n"), /\/model/);
-    await h.command("recover");
-    assert.deepEqual(h.selections, ["quick"]);
-    assert.equal(h.decisions().length, 1);
-    assert.deepEqual(h.sent, []);
-  });
-
-  it("invalid configuration blocks input until explicitly switched off", async () => {
-    const h = await harness({
-      load: async () => {
-        throw new Error("invalid config");
+        return () => terminalHandlers.delete(handler);
       },
-    });
+    },
+  };
 
-    assert.deepEqual(await h.input(), { action: "handled" });
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    await h.command("off");
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
+  return {
+    ctx,
+    notifications,
+    statuses,
+    editorTexts,
+    setIdle: (value) => {
+      idle = value;
+    },
+  };
+}
+
+/** The model and thinking selections a harness records, in call order. */
+interface SelectionLog {
+  results: boolean[];
+  models: string[];
+  thinking: string[];
+}
+
+interface HarnessOptions {
+  config?: RouterConfig;
+  loadFails?: boolean;
+  load?: () => Promise<RouterConfig | undefined>;
+  context?: ContextOptions;
+  classify?: Classify;
+  /** Probe outcome per target; the timeout is the configured generation-probe bound. */
+  probe?: (target: Target, timeoutMs: number) => Promise<GenerationProbeResult>;
+  /** Model-selection outcomes in order; `true` once the queue is empty. */
+  selectionResults?: boolean[];
+  /**
+   * Make `sessionManager.getBranch()` return the entries the router itself appended. This is
+   * how a reload or tree navigation is simulated after a doctor run persisted its proofs.
+   */
+  branchFromEntries?: boolean;
+}
+
+interface Harness extends FakeSession {
+  host: FakeHost;
+  config: RouterConfig;
+  models: string[];
+  thinking: string[];
+  probes: string[];
+  classified(): number;
+}
+
+/** A catalog containing exactly the configuration's targets, all usable and available. */
+function catalogFor(config: RouterConfig) {
+  return configuredTargets(config).map((target) => model(target.provider, target.model));
+}
+
+function harness(options: HarnessOptions = {}): Harness {
+  const config = options.config ?? parseConfig(baseConfigInput());
+
+  const selection: SelectionLog = {
+    results: [...(options.selectionResults ?? [])],
+    models: [],
+    thinking: [],
+  };
+
+  const terminalHandlers = new Set<TerminalHandler>();
+  const host = fakeHost(selection, terminalHandlers);
+
+  const liveBranch = options.branchFromEntries
+    ? () =>
+        host.entries.map((entry, index) =>
+          customEntry(entry.customType, entry.data, `live-${String(index)}`),
+        )
+    : undefined;
+
+  const session = context(
+    { ...options.context, catalog: options.context?.catalog ?? catalogFor(config) },
+    terminalHandlers,
+    liveBranch,
+  );
+
+  const probes: string[] = [];
+  let classified = 0;
+
+  registerRouter(host.api, {
+    configPath: CONFIG_PATH,
+    load: async () => {
+      if (options.loadFails) throw new Error("unreadable");
+
+      return options.load ? await options.load() : config;
+    },
+    classify: async (backend, state, call) => {
+      classified++;
+
+      if (options.classify) return await options.classify(backend, state, call);
+
+      throw new Error("classification is not expected in this suite");
+    },
+    probeGeneration: async (registry, target, signal, timeoutMs) => {
+      probes.push(`${target.provider}/${target.model}`);
+
+      if (options.probe) return await options.probe(target, timeoutMs);
+
+      return { target, passed: true, reason: "ok", milliseconds: 1 };
+    },
   });
 
-  it("session shutdown aborts classification and ignores late completion", async () => {
-    const entered = deferred<void>();
-    const pending = deferred<Classification>();
+  return {
+    host,
+    ...session,
+    config,
+    models: selection.models,
+    thinking: selection.thinking,
+    probes,
+    classified: () => classified,
+  };
+}
 
-    const h = await harness({
-      classify: () => {
-        entered.resolve();
+function automatic(): RouterConfig {
+  return parseConfig({ ...baseConfigInput(), mode: "auto" });
+}
 
-        return pending.promise;
-      },
-    });
+function shadow(): RouterConfig {
+  return parseConfig({ ...baseConfigInput(), mode: "shadow" });
+}
 
-    const input = h.input();
-    await entered.promise;
-    await h.emit("session_shutdown");
-    assert.equal(h.classifications[0][2].signal.aborted, true);
-    assert.deepEqual(await input, { action: "handled" });
-    pending.resolve(classification());
-    await nextTurn();
-    assert.deepEqual(h.selections, []);
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
+/** A classifier that always answers with one route and the given confidence. */
+function classifier(choice: TaskClass, confidence = 0.95): Classify {
+  const probabilities = { quick: 0.1, standard: 0.1, deep: 0.1, uncertain: 0.1 };
+
+  return async () =>
+    ({
+      choice,
+      probabilities: { ...probabilities, [choice]: 0.7 },
+      confidence,
+      requestedModel: "jev-1.13.0",
+      returnedModel: "jev-1.13.0",
+    }) satisfies Classification;
+}
+
+function classification(choice: TaskClass, confidence = 0.95): Classification {
+  return {
+    choice,
+    probabilities: { quick: 0.1, standard: 0.1, deep: 0.1, uncertain: 0.1, [choice]: 0.7 },
+    confidence,
+    requestedModel: "jev-1.13.0",
+    returnedModel: "jev-1.13.0",
+  };
+}
+
+function startSession(host: FakeHost, ctx: RouterContext) {
+  return host.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+}
+
+interface InputEventOverrides {
+  text?: string;
+  images?: readonly unknown[];
+  source?: string;
+  streamingBehavior?: string;
+}
+
+const inputEvent = (overrides: InputEventOverrides = {}) => ({
+  type: "input",
+  text: "explain this function",
+  images: [],
+  source: "interactive",
+  ...overrides,
+});
+
+/** A complete custom session entry; Pi always supplies id, parentId, and timestamp. */
+function customEntry(customType: string, data?: CustomEntryData, id = "entry"): SessionEntry {
+  return {
+    type: "custom",
+    id,
+    parentId: null,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    customType,
+    data,
+  };
+}
+
+test("registers the command and the hooks the extension depends on", () => {
+  const { host } = harness();
+
+  assert.equal(host.has(NAME), true);
+
+  for (const hook of [
+    "session_start",
+    "session_shutdown",
+    "input",
+    "model_select",
+    "message_end",
+    "agent_settled",
+  ])
+    assert.equal(host.hasHook(hook), true, `${hook} hook`);
+});
+
+test("session_start loads the injected configuration and replays the session mode", async () => {
+  const { host, ctx, notifications } = harness({
+    context: {
+      branch: [customEntry(`${NAME}-mode`, { mode: "shadow" })],
+    },
   });
 
-  it("doctor owns the input lock and rejects a second doctor until its read settles", async () => {
-    const read = deferred<RouterConfig>();
-    const entered = deferred<void>();
-    let reads = 0;
+  await startSession(host, ctx);
+  await host.fireCommand("status", ctx);
+  const status = notifications.at(-1) ?? "";
 
-    const h = await harness({
-      load: () => {
-        if (++reads === 1) return Promise.resolve(config());
-        entered.resolve();
+  assert.match(status, /pi-typesafe-router: status/);
+  assert.match(status, /routing: shadow/);
+  assert.match(status, /matches active configuration/);
+  assert.match(status, /current model: provider-quick\/quick-model/);
+});
 
-        return read.promise;
-      },
-    });
-
-    const doctor = h.command("doctor");
-    await entered.promise;
-    assert.deepEqual(await h.input(), { action: "handled" });
-    await h.command("doctor");
-    assert.equal(reads, 2);
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-    read.resolve(config({ mode: "shadow" }));
-    await doctor;
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 2);
-    assert.equal(h.decisions()[0].shadow, false);
+test("a mode entry from another session's branch is ignored", async () => {
+  const { host, ctx, notifications } = harness({
+    context: { branch: [customEntry("other-extension", { mode: "shadow" })] },
   });
 
-  it("off cancels a pending doctor and its late read cannot reenable routing", async () => {
-    const read = deferred<RouterConfig>();
-    const entered = deferred<void>();
-    let reads = 0;
+  await startSession(host, ctx);
+  await host.fireCommand("status", ctx);
 
-    const h = await harness({
-      load: () => {
-        if (++reads === 1) return Promise.resolve(config());
-        entered.resolve();
+  assert.match(notifications.at(-1) ?? "", /routing: off/);
+});
 
-        return read.promise;
-      },
-    });
+test("input passes through untouched while routing is off", async () => {
+  const { host, ctx, classified } = harness();
+  await startSession(host, ctx);
 
-    const doctor = h.command("doctor");
-    await entered.promise;
-    await h.command("off");
-    await doctor; // Cancellation must not wait for the underlying filesystem read.
-    assert.deepEqual(await h.input(), { action: "continue" });
-    read.resolve(config({ mode: "auto" }));
-    await nextTurn();
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-    await h.command("status");
-    assert.match(h.notifications.at(-1)!, /(?:mode|routing): off/i);
-  });
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0);
+});
 
-  it("shutdown aborts a pending doctor without waiting for or publishing its late read", async () => {
-    const read = deferred<RouterConfig>();
-    const entered = deferred<void>();
-    let reads = 0;
-
-    const h = await harness({
-      load: () => {
-        if (++reads === 1) return Promise.resolve(config());
-        entered.resolve();
-
-        return read.promise;
-      },
-    });
-
-    const doctor = h.command("doctor");
-    await entered.promise;
-
-    const published = [
-      h.entries.length,
-      h.statuses.length,
-      h.widgets.length + 1, // Shutdown removes the active progress widget.
-      h.notifications.length,
-    ];
-
-    await h.emit("session_shutdown");
-    await doctor;
-    assert.deepEqual(h.widgets.at(-1), ["typesafe-router-doctor-progress", undefined]);
-    assert.deepEqual(
-      [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
-      published,
-    );
-    read.resolve(config({ mode: "auto" }));
-    await nextTurn();
-    assert.deepEqual(
-      [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
-      published,
-    );
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-    assert.equal(h.terminal.size, 0);
-  });
-
-  for (const command of ["on", "shadow"]) {
-    for (const interruption of ["off", "shutdown"])
-      it(`delayed ${command} confirmation cannot enable after ${interruption}`, async () => {
-        const dialog = deferred<boolean>();
-        const asked = deferred<void>();
-
-        const h = await harness({
-          config: config({ mode: "off" }),
-          confirm: () => {
-            asked.resolve();
-
-            return dialog.promise;
-          },
-        });
-
-        const enabling = h.command(command);
-        await asked.promise;
-
-        if (interruption === "off") await h.command("off");
-        else await h.emit("session_shutdown");
-
-        const published = [
-          h.entries.length,
-          h.statuses.length,
-          h.widgets.length,
-          h.notifications.length,
-        ];
-
-        dialog.resolve(true);
-        await enabling;
-        assert.deepEqual(
-          [h.entries.length, h.statuses.length, h.widgets.length, h.notifications.length],
-          published,
-        );
-        assert.equal(h.classifications.length, 0);
-
-        if (interruption === "off") {
-          assert.deepEqual(await h.input(), { action: "continue" });
-          assert.equal(h.classifications.length, 0);
-        }
-
-        assert.deepEqual(h.selections, []);
-      });
-  }
-
-  it("off preserves the input lock until a noncancellable setter actually settles", async () => {
-    const entered = deferred<void>();
-    const setter = deferred<boolean>();
-
-    const h = await harness({
-      setModel: () => {
-        entered.resolve();
-
-        return setter.promise;
-      },
-    });
-
-    let settled = false;
-
-    const input = h.input().then((result) => {
-      settled = true;
-
-      return result;
-    });
-
-    await entered.promise;
-    await h.command("off");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(settled, false);
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, ["quick"]);
-    setter.resolve(true);
-    assert.deepEqual(await input, { action: "handled" });
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.decisions(), []);
-    assert.equal(h.terminal.size, 0);
-  });
-
+test("extension-injected and streaming input never reaches the classifier", async () => {
   for (const event of [
-    "session_before_switch",
-    "session_before_fork",
-    "session_before_tree",
-  ] as const)
-    it(`${event} vetoes navigation until the active setter settles`, async () => {
-      const entered = deferred<void>();
-      const setter = deferred<boolean>();
+    inputEvent({ source: "extension" }),
+    inputEvent({ streamingBehavior: "steer" }),
+    inputEvent({ streamingBehavior: "followUp" }),
+  ]) {
+    const { host, ctx, classified } = harness({ config: automatic() });
+    await startSession(host, ctx);
 
-      const h = await harness({
-        setModel: () => {
-          entered.resolve();
+    assert.deepEqual(await host.fire("input", event, ctx), { action: "continue" });
+    assert.equal(classified(), 0);
+  }
+});
 
-          return setter.promise;
-        },
-      });
+test("a busy session leaves the submission alone", async () => {
+  const { host, ctx, classified, setIdle } = harness({ config: automatic() });
+  await startSession(host, ctx);
+  setIdle(false);
 
-      const input = h.input();
-      await entered.promise;
-      assert.deepEqual(await h.emit(event), { cancel: true });
-      assert.deepEqual(await h.input(), { action: "handled" });
-      assert.deepEqual(await h.emit(event), { cancel: true });
-      setter.resolve(true);
-      assert.deepEqual(await input, { action: "handled" });
-      assert.equal(await h.emit(event), undefined);
-      assert.deepEqual(h.decisions(), []);
-      assert.equal(h.terminal.size, 0);
-    });
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0);
+});
 
-  for (const mode of ["tui", "rpc"] as const)
-    it(`doctor applies disk settings and checks automatically while off in ${mode}`, async () => {
-      let disk = config({ mode: "off" });
-
-      const h = await harness({
-        mode,
-        load: async () => disk,
-        confirm: unusedHostMethod,
-      });
-
-      disk = config({ mode: "auto", minConfidence: 0.8, allowHeadless: false });
-      await h.command("doctor");
-      assert.equal(h.classifications.length, 1);
-      const state = h.classifications[0][1];
-      assert.ok(state.current_request.length > 0);
-      assert.notEqual(state.current_request, PROMPT);
-      assert.deepEqual(state.recent_conversation, []);
-      assert.deepEqual(await h.input(), { action: "continue" });
-      assert.equal(h.classifications.length, 1);
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
-      assert.deepEqual(h.decisions(), []);
-      const report = h.notifications.at(-1)!;
-      assert.match(report, /^pi-typesafe-router: ✅\n/);
-      assert.match(report, /context usage: \d+ tokens\n/);
-      assert.doesNotMatch(report, /Pi accounting/);
-      assert.doesNotMatch(report, /config: applied|generation health:|routing verification:/);
-      assert.match(report, /routing policy:/);
-      assert.match(report, /current model:/);
-      assert.ok(report.indexOf("classifier:") < report.indexOf("routes:"));
-      assert.match(report, /routing: off/i);
-      assert.match(report, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
-      assert.match(report, /    fixture\/quick\n    ✅ passed in \d+ ms/);
-      assert.doesNotMatch(report, /next:|eligible locally|generation check:/);
-      assert.equal(report.match(/classifier:/g)?.length, 1);
-
-      if (mode === "rpc") {
-        assert.equal(h.widgets.length, 0);
-        assert.ok(h.notifications.includes("Checking model access… (4/4 complete)"));
-      }
-    });
-
-  for (const failure of ["missing", "error"] as const)
-    it(`doctor disables routing on ${failure} config without classifying`, async () => {
-      let reads = 0;
-
-      const h = await harness({
-        load: async () => {
-          if (++reads === 1) return config();
-
-          if (failure === "error") throw new Error(`${SECRET} ${PROMPT}`);
-
-          return undefined;
-        },
-      });
-
-      await h.command("doctor");
-      const report = h.notifications.at(-1)!;
-      assert.match(report, /^pi-typesafe-router: ❌\n/);
-      assert.match(report, failure === "missing" ? /missing/i : /error|invalid|failed/i);
-      assert.match(report, /routing: off/i);
-      assert.match(report, /next:/i);
-      assert.equal(h.classifications.length, 0);
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
-      assert.ok(!report.includes(SECRET));
-      assert.ok(!report.includes(PROMPT));
-    });
-
-  for (const code of ["credentials", "http", "network"] as const)
-    it(`doctor reports safe ${code} failure without exposing raw errors`, async () => {
-      const h = await harness({
-        classify: async () => {
-          const error = new ClassifierError(code, code === "http" ? 401 : undefined);
-          error.message = `${SECRET} ${PROMPT}`;
-          throw error;
-        },
-      });
-
-      await h.command("doctor");
-      const report = h.notifications.at(-1)!;
-      assert.match(report, /^pi-typesafe-router: ❌\n/);
-      assert.match(report, /classifier:\n  [^\n]+\n  ❌ failed in \d+ ms/i);
-      assert.match(report, new RegExp(code, "i"));
-      assert.match(report, /next:/i);
-
-      if (code === "http") assert.match(report, /401/);
-      assert.ok(!report.includes(SECRET));
-      assert.ok(!report.includes(PROMPT));
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
-    });
-
-  it("doctor timeout aborts the synthetic check and ignores late success", async () => {
-    const pending = deferred<Classification>();
-
-    const h = await harness({
-      config: config({ timeoutMs: 100 }),
-      classify: () => pending.promise,
-    });
-
-    await h.command("doctor");
-    assert.equal(h.classifications[0][2].signal.aborted, true);
-    assert.match(h.notifications.at(-1)!, /timeout|timed out/i);
-    const published = h.notifications.length;
-    pending.resolve(classification());
-    await nextTurn();
-    assert.equal(h.notifications.length, published);
-    assert.deepEqual(h.selections, []);
-    assert.deepEqual(h.sent, []);
+test("headless routing stays disabled unless the configuration allows it", async () => {
+  const { host, ctx, classified, probes, models } = harness({
+    config: automatic(),
+    context: { mode: "json", hasUI: false },
   });
 
-  for (const interruption of ["off", "escape", "shutdown"] as const)
-    it(`${interruption} invalidates doctor classification without late UI`, async () => {
-      const entered = deferred<void>();
-      const pending = deferred<Classification>();
+  await startSession(host, ctx);
 
-      const h = await harness({
-        classify: () => {
-          entered.resolve();
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0);
+  assert.deepEqual(probes, []);
+  assert.deepEqual(models, []);
+});
 
-          return pending.promise;
-        },
-      });
+test("an unreadable configuration continues the prompt instead of blocking it", async () => {
+  const { host, ctx, notifications, classified } = harness({ loadFails: true });
+  await startSession(host, ctx);
 
-      const doctor = h.command("doctor");
-      await entered.promise;
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0);
+  assert.ok(
+    notifications.some((message) => message.includes("Invalid router configuration")),
+    notifications.join("\n"),
+  );
 
-      if (interruption === "off") await h.command("off");
-      else if (interruption === "escape") h.escape();
-      else await h.emit("session_shutdown");
-      await doctor;
-      assert.equal(h.classifications[0][2].signal.aborted, true);
+  // The warning is emitted once, not on every submission.
+  const before = notifications.length;
 
-      const published = [
-        h.notifications.length,
-        h.statuses.length,
-        h.widgets.length,
-        h.entries.length,
-      ];
+  await host.fire("input", inputEvent(), ctx);
+  assert.equal(notifications.length, before);
+});
 
-      pending.resolve(classification());
-      await nextTurn();
-      assert.deepEqual(
-        [h.notifications.length, h.statuses.length, h.widgets.length, h.entries.length],
-        published,
-      );
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
-    });
-
-  it("setup openrouter persists a valid off configuration with the selected model", async (t) => {
-    const root = await mkdtemp(join(tmpdir(), "typesafe-router-setup-"));
-
-    t.after(() => rm(root, { recursive: true, force: true }));
-
-    const configPath = join(root, "typesafe-router.json");
-
-    const h = await harness({
-      unverified: true,
-      configPath,
-      load: loadConfig,
-      select: async (_title, choices) =>
-        choices.includes("fixture/quick") ? "fixture/quick" : undefined,
-    });
-
-    await h.command("setup openrouter");
-    const saved = await loadConfig(configPath);
-
-    assert.ok(saved);
-    assert.equal(saved.mode, "off");
-    assert.deepEqual(saved.backend, {
-      type: "openrouter",
-      model: "typesafe/jev-1.13",
-      auth: { source: "env", variable: "OPENROUTER_API_KEY" },
-    });
-    assert.deepEqual(saved.routes, {
-      quick: [target("quick")],
-      standard: [target("quick")],
-      deep: [target("quick")],
-    });
-    assert.match(h.notifications.at(-1)!, /Created .*routing is off/);
+test("only the classified route is inspected, so a broken other route cannot block it", async () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    mode: "auto",
+    routes: {
+      quick: [{ provider: "provider-broken", model: "missing-model", thinking: "low" }],
+      standard: [{ provider: "provider-standard", model: "standard-model", thinking: "medium" }],
+      deep: [{ provider: "provider-deep", model: "deep-model", thinking: "high" }],
+    },
   });
 
-  for (const invalid of [false, true])
-    it(`help is read-only while busy with ${invalid ? "invalid" : "missing"} config`, async () => {
-      let reads = 0;
+  // `provider-broken` is deliberately absent from the catalogue.
+  const { host, ctx, probes, models } = harness({ config, classify: classifier("deep") });
+  await startSession(host, ctx);
 
-      const h = await harness({
-        unverified: true,
-        idle: false,
-        load: async () => {
-          reads++;
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(probes, ["provider-deep/deep-model"]);
+  assert.deepEqual(models, ["provider-deep/deep-model"]);
+});
 
-          if (invalid) throw new Error("Invalid config");
-
-          return undefined;
-        },
-      });
-
-      const before = [h.entries.length, h.statuses.length, h.widgets.length];
-      await h.command("help");
-      const output = h.notifications.at(-1)!;
-      assert.match(output, /Command +Description/);
-
-      for (const command of ["setup", "doctor", "status", "on", "shadow", "off", "help"])
-        assert.match(output, new RegExp(`^${command} +`, "m"));
-
-      assert.match(output, /setup \[typesafe\|cloudflare\|vercel\|openrouter\]/);
-      assert.equal(reads, 1);
-      assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
-      assert.deepEqual(h.classifications, []);
-      assert.deepEqual(h.probes, []);
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
-    });
-
-  it("help does not cancel an active classification", async () => {
-    const entered = deferred<void>();
-    const pending = deferred<Classification>();
-
-    const h = await harness({
-      classify: () => {
-        entered.resolve();
-
-        return pending.promise;
-      },
-    });
-
-    const input = h.input();
-    await entered.promise;
-    await h.command("help");
-    assert.match(h.notifications.at(-1)!, /Command +Description/);
-    assert.equal(h.classifications[0][2].signal.aborted, false);
-    pending.resolve(classification());
-    assert.deepEqual(await input, { action: "continue" });
-    assert.deepEqual(h.selections, ["quick"]);
+test("the selected chain is probed in order and falls through to the next candidate", async () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    mode: "auto",
+    routes: {
+      quick: [
+        { provider: "provider-primary", model: "primary-model", thinking: "low" },
+        { provider: "provider-backup", model: "backup-model", thinking: "low" },
+      ],
+      standard: [{ provider: "provider-standard", model: "standard-model", thinking: "medium" }],
+      deep: [{ provider: "provider-deep", model: "deep-model", thinking: "high" }],
+    },
   });
 
-  it("doctor holds the lock through classification; status observes without cancelling", async () => {
-    const entered = deferred<void>();
-    const pending = deferred<Classification>();
-
-    const h = await harness({
-      classify: () => {
-        entered.resolve();
-
-        return pending.promise;
-      },
-    });
-
-    const doctor = h.command("doctor");
-    await entered.promise;
-    await h.command("doctor");
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(await h.input(), { action: "handled" });
-    await h.command("status");
-    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
-    assert.match(h.notifications.at(-1)!, /(?:activity|pending):.*(?:doctor|classif)/i);
-    assert.equal(h.classifications[0][2].signal.aborted, false);
-    pending.resolve(classification());
-    await doctor;
-    assert.match(h.notifications.at(-1)!, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
-    assert.deepEqual(h.selections, []);
+  const { host, ctx, probes, models, thinking, notifications } = harness({
+    config,
+    classify: classifier("quick"),
+    probe: async (target) => ({
+      target,
+      passed: target.provider === "provider-backup",
+      reason: target.provider === "provider-backup" ? "ok" : "request-failed",
+      milliseconds: 1,
+    }),
   });
 
-  it("status during a delayed doctor read neither cancels nor applies its own disk snapshot", async () => {
-    const read = deferred<RouterConfig>();
-    const entered = deferred<void>();
-    let reads = 0;
+  await startSession(host, ctx);
 
-    const h = await harness({
-      load: async () => {
-        reads++;
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(probes, ["provider-primary/primary-model", "provider-backup/backup-model"]);
+  assert.deepEqual(models, ["provider-backup/backup-model"]);
+  assert.deepEqual(thinking, ["low"]);
+  assert.ok(
+    notifications.some((message) => /quick → provider-backup\/backup-model/.test(message)),
+    notifications.join("\n"),
+  );
+});
 
-        if (reads === 1) return config({ mode: "off" });
-
-        if (reads === 2) {
-          entered.resolve();
-
-          return read.promise;
-        }
-
-        return config({ mode: "auto" });
-      },
-    });
-
-    const doctor = h.command("doctor");
-    await entered.promise;
-    await h.command("status");
-    assert.equal(reads, 2);
-    assert.match(h.notifications.at(-1)!, /not compared while an operation is running/i);
-    assert.match(h.notifications.at(-1)!, /routing: off/i);
-    assert.match(h.notifications.at(-1)!, /activity:.*(?:doctor|read|config)/i);
-    assert.equal(h.classifications.length, 0);
-    read.resolve(config({ mode: "auto" }));
-    await doctor;
-    assert.equal(h.classifications.length, 1);
-    assert.match(h.notifications.at(-1)!, /classifier:\n  [^\n]+\n  ✅ passed in \d+ ms/i);
-    assert.match(h.notifications.at(-1)!, /routing: off/i);
+test("a passed probe is reused for the session instead of re-probing every submission", async () => {
+  const { host, ctx, probes, models } = harness({
+    config: automatic(),
+    classify: classifier("deep"),
   });
 
-  it("status rereads disk without applying edits or changing the active mode", async () => {
-    let reads = 0;
-    let disk = config();
+  await startSession(host, ctx);
 
-    const h = await harness({
-      load: async () => {
-        reads++;
+  await host.fire("input", inputEvent(), ctx);
+  assert.deepEqual(probes, ["provider-deep/deep-model"]);
 
-        return disk;
-      },
-    });
+  await host.fire("input", inputEvent(), ctx);
+  assert.deepEqual(probes, ["provider-deep/deep-model"]);
+  assert.deepEqual(models, ["provider-deep/deep-model", "provider-deep/deep-model"]);
+});
 
-    disk = config({ mode: "off", defaultRoute: "deep" });
-    await h.command("status");
-    assert.equal(reads, 2);
-    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
-    assert.match(h.notifications.at(-1)!, /unapplied|changed|differ/i);
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.entries, []);
-    await h.command("doctor");
-    await h.command("status");
-    assert.match(h.notifications.at(-1)!, /(?:matches|unchanged|in sync|applied)/i);
-    assert.match(h.notifications.at(-1)!, /(?:mode|routing): auto/i);
+test("a classifier failure continues on the current model and records the fallback", async () => {
+  const { host, ctx, notifications, models, thinking } = harness({
+    config: automatic(),
+    classify: async () => {
+      throw new ClassifierError("timeout");
+    },
   });
 
-  for (const command of ["reload", "validate", "check", "cancel", "recover"])
-    it(`removed ${command} gives guidance without effects`, async () => {
-      let reads = 0;
+  await startSession(host, ctx);
 
-      const h = await harness({
-        load: async () => {
-          reads++;
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(models, []);
+  assert.deepEqual(thinking, []);
+  assert.ok(
+    notifications.some((message) => /could not classify this request \(timeout\)/.test(message)),
+    notifications.join("\n"),
+  );
 
-          return config();
-        },
-      });
+  const decision = decisionOf(host);
+  assert.deepEqual(decision?.fallback, "classifier-failure");
+});
 
-      const before = [h.entries.length, h.statuses.length, h.widgets.length];
-      await h.command(command);
-      assert.match(h.notifications.at(-1)!, /removed/i);
-      assert.match(
-        h.notifications.at(-1)!,
-        command === "recover" ? /\/model/ : command === "cancel" ? /off|Escape/i : /doctor/i,
-      );
-      assert.equal(reads, 1);
-      assert.deepEqual([h.entries.length, h.statuses.length, h.widgets.length], before);
-      assert.equal(h.classifications.length, 0);
-      assert.deepEqual(h.selections, []);
-      assert.deepEqual(h.sent, []);
+test("a route whose candidates all fail probing continues on the current model", async () => {
+  const { host, ctx, notifications, models, thinking, probes } = harness({
+    config: automatic(),
+    classify: classifier("deep"),
+    probe: async (target) => ({
+      target,
+      passed: false,
+      reason: "request-failed",
+      milliseconds: 1,
+    }),
+  });
+
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(probes, ["provider-deep/deep-model"]);
+  assert.deepEqual(models, []);
+  assert.deepEqual(thinking, []);
+  assert.ok(
+    notifications.some((message) =>
+      /No usable model in the deep route \(probe-failed\)/.test(message),
+    ),
+    notifications.join("\n"),
+  );
+
+  const decision = decisionOf(host);
+  assert.deepEqual(decision?.fallback, "probe-failed");
+});
+
+test("a model-application failure continues on the current model without changing effort", async () => {
+  const { host, ctx, notifications, models, thinking } = harness({
+    config: automatic(),
+    classify: classifier("deep"),
+    selectionResults: [false],
+  });
+
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(models, ["provider-deep/deep-model"]);
+  assert.deepEqual(thinking, []);
+  assert.ok(
+    notifications.some((message) => /No usable model in the deep route/.test(message)),
+    notifications.join("\n"),
+  );
+});
+
+test("an uncertain classification stays on the conservative route and is not a failure", async () => {
+  const { host, ctx, models, notifications } = harness({
+    config: automatic(),
+    classify: classifier("quick", 0.2),
+  });
+
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(models, ["provider-deep/deep-model"]);
+  assert.ok(
+    notifications.some((message) => message.includes("deep → provider-deep/deep-model")),
+    notifications.join("\n"),
+  );
+});
+
+test("input without classifiable context skips Jev and takes the conservative route", async () => {
+  const { host, ctx, classified, probes, models } = harness({ config: automatic() });
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent({ text: "/skill:repo-docs" }), ctx), {
+    action: "continue",
+  });
+  assert.equal(classified(), 0);
+  assert.deepEqual(probes, ["provider-deep/deep-model"]);
+  assert.deepEqual(models, ["provider-deep/deep-model"]);
+
+  const decision = decisionOf(host);
+  assert.equal(decision?.route, "deep");
+  assert.equal(decision?.reason, "insufficient-context");
+});
+
+test("cancellation restores the prompt to the editor and suppresses generation", async () => {
+  let release: ((value: Classification) => void) | undefined;
+
+  const classify: Classify = () =>
+    new Promise<Classification>((resolve) => {
+      release = resolve;
     });
 
-  for (const command of ["on", "shadow"] as const)
-    it(`${command} cannot enable RPC routing just because a UI facade exists`, async () => {
-      const h = await harness({
-        mode: "rpc",
-        config: config({ mode: "off", allowHeadless: false }),
-        confirm: unusedHostMethod,
-      });
+  const { host, ctx, editorTexts, models, notifications } = harness({
+    config: automatic(),
+    classify,
+  });
 
-      await h.command("doctor");
-      assert.match(h.notifications.at(-1)!, /allowHeadless is false/);
-      assert.doesNotMatch(h.notifications.at(-1)!, /next: \/typesafe-router on/);
-      await h.command(command);
-      assert.match(h.notifications.at(-1)!, /disabled in this interface/);
-      assert.deepEqual(await h.input(), { action: "continue" });
-      assert.equal(h.classifications.length, 1);
-      assert.deepEqual(h.selections, []);
-    });
+  await startSession(host, ctx);
 
-  it("successful decisions contain neither credentials nor the raw prompt", async () => {
-    const h = await harness();
-    await h.input();
-    assert.equal(h.classifications[0][1].current_request, PROMPT);
-    assert.equal(h.classifications[0][2].apiKey, SECRET);
-    assert.equal(h.decisions().length, 1);
-    const persisted = JSON.stringify(h.entries);
-    assert.ok(!persisted.includes(SECRET));
-    assert.ok(!persisted.includes(PROMPT));
+  const pending = host.fire("input", inputEvent(), ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(host.hasTerminalHandler(), true);
+  assert.deepEqual(host.terminal("escape"), { consume: true });
+  release?.(classification("quick"));
+
+  assert.deepEqual(await pending, { action: "handled" });
+  assert.deepEqual(editorTexts, ["explain this function"]);
+  assert.deepEqual(models, []);
+  assert.ok(
+    notifications.some((message) => message.includes("restored to the editor")),
+    notifications.join("\n"),
+  );
+});
+
+test("cancellation reports unrestored attachments instead of silently dropping them", async () => {
+  let release: ((value: Classification) => void) | undefined;
+
+  const { host, ctx, notifications } = harness({
+    config: automatic(),
+    classify: () =>
+      new Promise<Classification>((resolve) => {
+        release = resolve;
+      }),
+  });
+
+  await startSession(host, ctx);
+
+  const pending = host.fire(
+    "input",
+    inputEvent({ images: [{ type: "image", data: "AAAA", mimeType: "image/png" }] }),
+    ctx,
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  host.terminal("escape");
+  release?.(classification("quick"));
+
+  await pending;
+  assert.ok(
+    notifications.some((message) => message.includes("Image attachments are not restored")),
+    notifications.join("\n"),
+  );
+});
+
+test("shadow mode classifies and proposes without probing or switching models", async () => {
+  const { host, ctx, probes, models, thinking } = harness({
+    config: shadow(),
+    classify: classifier("quick"),
+  });
+
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(probes, []);
+  assert.deepEqual(models, []);
+  assert.deepEqual(thinking, []);
+
+  const decision = decisionOf(host);
+  assert.equal(decision?.shadow, true);
+  assert.equal(
+    decision?.target?.provider,
+    "provider-quick",
+    "shadow records the proposal it would have applied",
+  );
+});
+
+test("a shadow classifier failure records the fallback, not a proposed route", async () => {
+  const { host, ctx, probes, models } = harness({
+    config: shadow(),
+    classify: async () => {
+      throw new ClassifierError("model-mismatch");
+    },
+  });
+
+  await startSession(host, ctx);
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.deepEqual(probes, []);
+  assert.deepEqual(models, []);
+
+  const data = decisionOf(host);
+
+  assert.equal(data?.fallback, "classifier-failure");
+  assert.equal(data?.target, undefined, "shadow proposed a target it never classified");
+  assert.equal(data?.reason, "model-mismatch");
+});
+
+test("a decision records the policy, configuration, and candidate provenance", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  const provenance = decisionOf(host)?.provenance;
+
+  for (const hash of [
+    provenance?.policyHash,
+    provenance?.configHash,
+    provenance?.candidateSnapshotHash,
+  ])
+    assert.match(hash ?? "", /^[0-9a-f]{64}$/u);
+
+  assert.deepEqual(provenance?.classifierModel, {
+    requested: "jev-1.13.0",
+    returned: "jev-1.13.0",
   });
 });
 
-describe("generation readiness gate", { timeout: 3000 }, () => {
-  it("restores successful doctor verification after an extension reload", async () => {
-    const h = await harness({ unverified: true });
-    await h.command("doctor");
-    assert.equal(h.classifications.length, 1);
+test("doctor local reports the configuration without any request", async () => {
+  const { host, ctx, probes, classified, notifications } = harness({ config: automatic() });
+  await startSession(host, ctx);
 
-    await h.emit("session_start", { reason: "reload" });
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto"]);
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 2);
-    assert.deepEqual(h.selections, ["quick"]);
+  await host.fireCommand("doctor local", ctx);
+
+  assert.equal(classified(), 0, "a local run must not contact the classifier");
+  assert.deepEqual(probes, [], "a local run must not probe generation models");
+
+  const report = notifications.join("\n");
+
+  assert.match(report, /checks: local only/u);
+  assert.match(report, /provenance: policy/u);
+  assert.match(report, /pi-typesafe-router: ✅/u);
+});
+
+test("doctor local keeps proofs a live run earned", async () => {
+  const { host, ctx, probes } = harness({ config: automatic(), classify: classifier("quick") });
+  await startSession(host, ctx);
+  await host.fireCommand("doctor live", ctx);
+  const afterLive = probes.length;
+
+  await host.fireCommand("doctor local", ctx);
+  await host.fireCommand("doctor local", ctx);
+  assert.equal(probes.length, afterLive);
+});
+
+test("a live doctor publishes no proof when its final configuration check changes", async () => {
+  const config = automatic();
+  const changed = parseConfig({ ...baseConfigInput(), mode: "auto", minConfidence: 0.7 });
+  let reads = 0;
+
+  const { host, ctx, probes } = harness({
+    config,
+    classify: classifier("quick"),
+    load: async () => {
+      reads++;
+
+      return reads === 3 ? changed : config;
+    },
   });
 
-  it("does not restore an older verification after a later doctor failure", async () => {
-    let failClassifier = false;
+  await startSession(host, ctx);
+  await host.fireCommand("doctor live", ctx);
 
-    const h = await harness({
-      unverified: true,
-      classify: async () => {
-        if (failClassifier) throw new ClassifierError("credentials");
+  assert.deepEqual(probes, [
+    "provider-quick/quick-model",
+    "provider-standard/standard-model",
+    "provider-deep/deep-model",
+  ]);
 
-        return classification();
+  await host.fire("input", inputEvent(), ctx);
+  assert.equal(probes.at(-1), "provider-quick/quick-model");
+  assert.equal(probes.length, 4, "automatic routing must re-probe after an invalid doctor run");
+});
+
+test("manual doctor still probes every distinct configured target", async () => {
+  const { host, ctx, probes, classified, notifications } = harness({
+    config: automatic(),
+    classify: classifier("quick"),
+  });
+
+  await startSession(host, ctx);
+
+  await host.fireCommand("doctor", ctx);
+
+  assert.deepEqual(probes, [
+    "provider-quick/quick-model",
+    "provider-standard/standard-model",
+    "provider-deep/deep-model",
+  ]);
+  assert.equal(classified(), 1, "doctor makes its own synthetic classifier request");
+  assert.ok(
+    notifications.some((message) => message.includes("pi-typesafe-router: ✅")),
+    notifications.join("\n"),
+  );
+});
+
+test("bare doctor and doctor live are the same billable run", async () => {
+  const probesFor = async (args: string) => {
+    const { host, ctx, probes } = harness({ config: automatic(), classify: classifier("quick") });
+    await startSession(host, ctx);
+    await host.fireCommand(args, ctx);
+
+    return probes;
+  };
+
+  assert.deepEqual(await probesFor("doctor"), await probesFor("doctor live"));
+});
+
+test("an unknown doctor option is refused instead of silently ignored", async () => {
+  const { host, ctx, probes, notifications } = harness({ config: automatic() });
+  await startSession(host, ctx);
+
+  await host.fireCommand("doctor remote", ctx);
+
+  assert.deepEqual(probes, []);
+  assert.ok(notifications.some((message) => message.includes("doctor [local|live]")));
+});
+
+test("a manual model selection turns automatic routing off", async () => {
+  const { host, ctx } = harness({ config: automatic() });
+  await startSession(host, ctx);
+
+  await host.fire(
+    "model_select",
+    { type: "model_select", model: model("provider-deep", "deep-model"), source: "set" },
+    ctx,
+  );
+
+  assert.ok(
+    host.entries.some(
+      (entry) =>
+        entry.customType === `${NAME}-mode` && JSON.stringify(entry.data) === '{"mode":"off"}',
+    ),
+    JSON.stringify(host.entries),
+  );
+});
+
+test("/typesafe-router off persists the session mode and stops routing", async () => {
+  const { host, ctx, notifications, classified } = harness({ config: automatic() });
+  await startSession(host, ctx);
+  await host.fireCommand("off", ctx);
+
+  assert.ok(notifications.some((message) => /routing: off/.test(message)));
+  assert.ok(
+    host.entries.some(
+      (entry) =>
+        entry.customType === `${NAME}-mode` && JSON.stringify(entry.data) === '{"mode":"off"}',
+    ),
+  );
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0);
+});
+
+test("enabling routing needs a valid configuration, not a doctor run", async () => {
+  const { host, ctx, probes, classified } = harness({ classify: classifier("quick") });
+  await startSession(host, ctx);
+
+  await host.fireCommand("on", ctx);
+
+  assert.ok(
+    host.entries.some(
+      (entry) =>
+        entry.customType === `${NAME}-mode` && JSON.stringify(entry.data) === '{"mode":"auto"}',
+    ),
+    JSON.stringify(host.entries),
+  );
+  assert.deepEqual(probes, [], "enabling routing probes nothing by itself");
+
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 1);
+});
+
+test("/typesafe-router help does not touch configuration", async () => {
+  const { host, ctx, notifications } = harness();
+  const before = host.entries.length;
+  await startSession(host, ctx);
+
+  await host.fireCommand("help", ctx);
+
+  assert.ok(notifications.some((message) => message.includes("Usage: /typesafe-router")));
+  assert.equal(host.entries.length, before);
+});
+
+test("a removed command reports its replacement instead of failing", async () => {
+  const { host, ctx, notifications } = harness();
+  await startSession(host, ctx);
+
+  await host.fireCommand("recover", ctx);
+
+  assert.ok(notifications.some((message) => message.includes("Recovery command removed")));
+});
+
+interface RoutedMessageOverrides {
+  stopReason?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    totalTokens?: number;
+    cost?: {
+      input?: number;
+      output?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+      total?: number;
+    };
+  };
+}
+
+/** One assistant message from the routed model, shaped as Pi delivers it. */
+function routedMessage(provider: string, id: string, overrides: RoutedMessageOverrides = {}) {
+  return {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      provider,
+      model: id,
+      stopReason: "stop",
+      usage: {
+        input: 120,
+        output: 40,
+        cacheRead: 10,
+        cacheWrite: 0,
+        totalTokens: 170,
+        cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
       },
-    });
+      ...overrides,
+    },
+  };
+}
 
-    await h.command("doctor");
-    failClassifier = true;
-    await h.command("doctor");
-    await h.emit("session_start", { reason: "reload" });
+/**
+ * The entry payloads this file reads, parsed the way any reader of a session file must: an
+ * unknown entry in, a named shape out. Each schema states only the fields the tests assert;
+ * `passthrough` keeps the rest visible without widening the type.
+ */
+const targetSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  thinking: z.string(),
+});
 
-    assert.deepEqual(h.statuses.at(-1), ["typesafe-router", "Jev auto: doctor required"]);
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.deepEqual(h.selections, []);
+const decisionEntrySchema = z
+  .object({
+    decisionId: z.string(),
+    mode: z.string(),
+    shadow: z.boolean(),
+    applied: z.boolean(),
+    route: z.string(),
+    reason: z.string(),
+    fallback: z.string().optional(),
+    backend: z.string(),
+    target: targetSchema.optional(),
+    milliseconds: z.number(),
+    minConfidence: z.number(),
+    candidates: z.array(
+      z.object({ target: z.string(), status: z.string(), reason: z.string().optional() }),
+    ),
+    selectedIndex: z.number().optional(),
+    projection: z.object({ characters: z.number(), historyMessages: z.number() }),
+    provenance: z.object({
+      policyId: z.string(),
+      policyHash: z.string(),
+      configHash: z.string(),
+      candidateSnapshotHash: z.string(),
+      classifierModel: z.object({ requested: z.string(), returned: z.string().optional() }),
+    }),
+  })
+  .passthrough();
+
+const usageSchema = z
+  .object({
+    inputTokens: z.number(),
+    outputTokens: z.number(),
+    cacheReadTokens: z.number(),
+    cacheWriteTokens: z.number(),
+    totalTokens: z.number(),
+    costUsd: z.number(),
+  })
+  .partial();
+
+const outcomeEntrySchema = z
+  .object({
+    decisionId: z.string(),
+    provider: z.string(),
+    model: z.string(),
+    configuredThinking: z.string().optional(),
+    status: z.string(),
+    stopReason: z.string().optional(),
+    responses: z.number(),
+    elapsedSinceRoutingMs: z.number().optional(),
+    usage: usageSchema.optional(),
+  })
+  .passthrough();
+
+const feedbackEntrySchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    decisionId: z.string(),
+    expectedRoute: z.string().optional(),
+    skipped: z.boolean(),
+  })
+  .passthrough();
+
+const verificationEntrySchema = z
+  .object({ verified: z.boolean(), proofs: z.array(z.unknown()).optional() })
+  .passthrough();
+
+type DecisionData = z.infer<typeof decisionEntrySchema>;
+
+type OutcomeData = z.infer<typeof outcomeEntrySchema>;
+
+type FeedbackData = z.infer<typeof feedbackEntrySchema>;
+
+/** Parse every entry of one custom type; a payload that does not parse is not returned. */
+function parsedEntries<T>(host: FakeHost, customType: string, schema: z.ZodType<T>): T[] {
+  return host.entries.flatMap((entry) => {
+    if (entry.customType !== customType) return [];
+
+    const parsed = schema.safeParse(entry.data);
+
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function decisionsOf(host: FakeHost): DecisionData[] {
+  return parsedEntries(host, `${NAME}-decision`, decisionEntrySchema);
+}
+
+function decisionOf(host: FakeHost): DecisionData | undefined {
+  return decisionsOf(host).at(-1);
+}
+
+function outcomesOf(host: FakeHost): OutcomeData[] {
+  return parsedEntries(host, `${NAME}-outcome`, outcomeEntrySchema);
+}
+
+function feedbackOf(host: FakeHost): FeedbackData[] {
+  return parsedEntries(host, `${NAME}-feedback`, feedbackEntrySchema);
+}
+
+function verificationOf(host: FakeHost) {
+  return parsedEntries(host, `${NAME}-verification`, verificationEntrySchema);
+}
+
+/** A session branch already holding one decision entry, as a resumed session would have. */
+function branchWithDecision(decisionId: string): SessionEntry[] {
+  return [customEntry(`${NAME}-decision`, { decisionId }, "decision-entry")];
+}
+
+test("a decision records its mode, candidates, projection, and schema version", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  const decision = decisionOf(host);
+
+  assert.equal(decision?.schemaVersion, 2);
+  assert.match(String(decision?.decisionId), /^[0-9a-f]{16}$/u);
+  assert.equal(decision?.mode, "auto");
+  assert.equal(decision?.shadow, false);
+  assert.equal(decision?.applied, true);
+  assert.equal(decision?.minConfidence, 0.8);
+  assert.equal(decision?.margin, 0.6);
+  assert.deepEqual(decision?.candidates, [
+    { target: "provider-deep/deep-model", status: "applied" },
+  ]);
+  assert.deepEqual(decision?.projection, {
+    characters: "explain this function".length,
+    historyMessages: 0,
+  });
+  assert.deepEqual(decision?.target, {
+    provider: "provider-deep",
+    model: "deep-model",
+    thinking: "high",
+  });
+});
+
+test("an unapplied decision records every candidate outcome and its fallback", async () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    mode: "auto",
+    routes: {
+      quick: [
+        { provider: "provider-primary", model: "primary-model", thinking: "low" },
+        { provider: "provider-backup", model: "backup-model", thinking: "low" },
+      ],
+      standard: [{ provider: "provider-standard", model: "standard-model", thinking: "medium" }],
+      deep: [{ provider: "provider-deep", model: "deep-model", thinking: "high" }],
+    },
   });
 
-  it("tombstones a persisted verification when its fingerprint no longer matches", async () => {
-    const h = await harness({ unverified: true });
-    await h.command("doctor");
-    h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({ apiKey: "changed-reference" });
-    await h.emit("session_start", { reason: "reload" });
-
-    assert.deepEqual(h.entries.at(-1), {
-      type: "typesafe-router-verification",
-      data: { verified: false },
-    });
-
-    h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({ apiKey: SECRET });
-    await h.emit("session_start", { reason: "reload" });
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.classifications.length, 1);
+  const { host, ctx } = harness({
+    config,
+    classify: classifier("quick"),
+    probe: async (target) => ({
+      target,
+      passed: false,
+      reason: "request-failed",
+      milliseconds: 1,
+    }),
   });
 
-  it("clears verification when tree navigation reaches a branch without proof", async () => {
-    const h = await harness({ unverified: true });
-    await h.command("doctor");
-    h.entries.length = 0;
-    await h.emit("session_tree");
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, []);
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  const decision = decisionOf(host);
+
+  assert.equal(decision?.applied, false);
+  assert.equal(decision?.fallback, "probe-failed");
+  assert.equal(decision?.target, undefined);
+  assert.deepEqual(decision?.candidates, [
+    { target: "provider-primary/primary-model", status: "probe-failed", reason: "request-failed" },
+    { target: "provider-backup/backup-model", status: "probe-failed", reason: "request-failed" },
+  ]);
+});
+
+test("a chain fallback records the applied index, not the first candidate", async () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    mode: "auto",
+    routes: {
+      quick: [
+        { provider: "provider-primary", model: "primary-model", thinking: "low" },
+        { provider: "provider-backup", model: "backup-model", thinking: "low" },
+      ],
+      standard: [{ provider: "provider-standard", model: "standard-model", thinking: "medium" }],
+      deep: [{ provider: "provider-deep", model: "deep-model", thinking: "high" }],
+    },
   });
 
-  it("restores verification when tree navigation reaches a branch with valid proof", async () => {
-    let failClassifier = false;
+  const { host, ctx } = harness({
+    config,
+    classify: classifier("quick"),
+    probe: async (target) => ({
+      target,
+      passed: target.provider === "provider-backup",
+      reason: target.provider === "provider-backup" ? "ok" : "request-failed",
+      milliseconds: 1,
+    }),
+  });
 
-    const h = await harness({
-      unverified: true,
-      classify: async () => {
-        if (failClassifier) throw new ClassifierError("credentials");
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
 
-        return classification();
+  const decision = decisionOf(host);
+
+  assert.equal(decision?.selectedIndex, 1);
+  assert.equal(decision?.applied, true);
+  assert.deepEqual(decision?.candidates, [
+    { target: "provider-primary/primary-model", status: "probe-failed", reason: "request-failed" },
+    { target: "provider-backup/backup-model", status: "applied" },
+  ]);
+});
+
+test("the routed generation appends exactly one correlated outcome entry", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  const decision = decisionOf(host);
+
+  await host.fire("message_end", routedMessage("provider-deep", "deep-model"), ctx);
+  // A second turn in the same run counts, but must not open a second outcome.
+  await host.fire("message_end", routedMessage("provider-deep", "deep-model"), ctx);
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+  // A repeated settle must not duplicate the entry.
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+
+  const outcomes = outcomesOf(host);
+
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0]?.decisionId, decision?.decisionId);
+  assert.equal(outcomes[0]?.status, "settled");
+  assert.equal(outcomes[0]?.responses, 2);
+  assert.equal(outcomes[0]?.configuredThinking, "high");
+  assert.ok(Number.isFinite(outcomes[0]?.elapsedSinceRoutingMs));
+  assert.deepEqual(outcomes[0]?.usage, {
+    inputTokens: 240,
+    outputTokens: 80,
+    cacheReadTokens: 20,
+    cacheWriteTokens: 0,
+    totalTokens: 340,
+    costUsd: 0.06,
+  });
+});
+
+test("a routed run that ends before any assistant response records one aborted outcome", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  const decision = decisionOf(host);
+  assert.equal(decision?.applied, true, "the route must be applied for this case to be routed");
+
+  // No message_end arrives: the run was aborted before generation was observable.
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+
+  const outcomes = outcomesOf(host);
+
+  assert.equal(outcomes.length, 1, "an applied route still gets a terminal outcome");
+  assert.equal(outcomes[0]?.decisionId, decision?.decisionId);
+  assert.equal(outcomes[0]?.status, "aborted");
+  assert.equal(outcomes[0]?.responses, 0);
+  assert.equal(outcomes[0]?.stopReason, undefined);
+});
+
+test("partial usage stays unknown instead of becoming an observed zero", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  await host.fire("message_end", routedMessage("provider-deep", "deep-model"), ctx);
+  await host.fire(
+    "message_end",
+    routedMessage("provider-deep", "deep-model", {
+      usage: {
+        input: 80,
+        output: 20,
+        cacheRead: 5,
+        totalTokens: 105,
       },
-    });
+    }),
+    ctx,
+  );
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
 
-    await h.command("doctor");
-    const verifiedBranch = [...h.entries];
-    failClassifier = true;
-    await h.command("doctor");
-    h.entries.splice(0, h.entries.length, ...verifiedBranch);
-    await h.emit("session_tree");
-    await h.command("on");
-    failClassifier = false;
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["quick"]);
+  const outcome = outcomesOf(host)[0];
+  assert.deepEqual(outcome?.usage, {
+    inputTokens: 200,
+    outputTokens: 60,
+    cacheReadTokens: 15,
+    totalTokens: 275,
+  });
+});
+
+test("an errored routed generation is recorded as an error, not as success", async () => {
+  const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  await host.fire(
+    "message_end",
+    routedMessage("provider-deep", "deep-model", { stopReason: "error" }),
+    ctx,
+  );
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+
+  const outcomes = outcomesOf(host);
+
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0]?.status, "error");
+  assert.equal(outcomes[0]?.stopReason, "error");
+});
+
+test("a shadow decision claims no routed generation outcome", async () => {
+  const { host, ctx } = harness({ config: shadow(), classify: classifier("quick") });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  await host.fire("message_end", routedMessage("provider-quick", "quick-model"), ctx);
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+
+  assert.deepEqual(outcomesOf(host), []);
+});
+
+test("a decision that fell back to the current model claims no outcome", async () => {
+  const { host, ctx } = harness({
+    config: automatic(),
+    classify: classifier("deep"),
+    probe: async (target) => ({ target, passed: false, reason: "timeout", milliseconds: 1 }),
   });
 
-  for (const mode of ["auto", "shadow"] as const)
-    it(`${mode} startup blocks input and enabling until doctor succeeds`, async () => {
-      const h = await harness({ unverified: true, config: config({ mode }) });
-      assert.deepEqual(await h.input(), { action: "handled" });
-      await h.command(mode === "auto" ? "on" : "shadow");
-      assert.match(h.notifications.join("\n"), /doctor/i);
-      assert.equal(h.classifications.length, 0);
-      assert.deepEqual(h.selections, []);
-      await h.command("doctor");
-      await h.command(mode === "auto" ? "on" : "shadow");
-      assert.deepEqual(await h.input(), { action: "continue" });
-      assert.equal(h.classifications.length, 2);
-    });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  await host.fire("message_end", routedMessage("provider-quick", "quick-model"), ctx);
+  await host.fire("agent_settled", { type: "agent_settled" }, ctx);
 
-  it("runs classifier and all generation probes concurrently with shared progress", async () => {
-    const classifier = deferred<Classification>();
-    const pending = new Map(["quick", "standard", "deep"].map((id) => [id, deferred<void>()]));
+  assert.deepEqual(outcomesOf(host), []);
+});
 
-    const h = await harness({
-      unverified: true,
-      config: config({ mode: "off" }),
-      classify: () => classifier.promise,
-      probeGeneration: async (_registry, candidate) => {
-        await pending.get(candidate.model)!.promise;
+test("feedback binds to the newest decision on the branch and changes no routing", async () => {
+  const decisionId = "0123456789abcdef";
 
-        return { target: candidate, passed: true, reason: "ok", milliseconds: 12 };
-      },
-    });
-
-    const doctor = h.command("doctor");
-    await nextTurn();
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(
-      h.probes.map((args) => args[1].model),
-      ["quick", "standard", "deep"],
-    );
-    assert.ok(
-      h.widgets.some(([, lines]) => Array.isArray(lines) && lines[0] === "Checking configuration…"),
-    );
-    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (0/4 complete)"]);
-    pending.get("deep")!.resolve();
-    await nextTurn();
-    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (1/4 complete)"]);
-    classifier.resolve(classification());
-    await nextTurn();
-    assert.deepEqual(h.widgets.at(-1)?.[1], ["Checking model access… (2/4 complete)"]);
-    pending.get("standard")!.resolve();
-    pending.get("quick")!.resolve();
-    await doctor;
-    assert.ok(
-      h.widgets.some(
-        ([, lines]) => Array.isArray(lines) && lines[0] === "Checking model access… (4/4 complete)",
-      ),
-    );
-    assert.ok(
-      h.widgets.some(([, lines]) => Array.isArray(lines) && lines[0] === "Checks complete"),
-    );
-    assert.equal(h.widgets.at(-1)?.[1], undefined);
-    assert.ok(h.widgets.every(([key]) => key === "typesafe-router-doctor-progress"));
-    assert.ok(
-      h.widgets.slice(0, -1).every(([, , options]) => options?.placement === "aboveEditor"),
-    );
-    const report = h.notifications.at(-1)!;
-    assert.match(report, /^pi-typesafe-router: ✅/);
-    assert.ok(report.indexOf("fixture/quick") < report.indexOf("fixture/standard"));
-    assert.ok(report.indexOf("fixture/standard") < report.indexOf("fixture/deep"));
-    assert.doesNotMatch(h.notifications.join("\n"), /generation check: testing/);
+  const { host, ctx, notifications, probes, models } = harness({
+    classify: classifier("quick"),
+    context: { branch: branchWithDecision(decisionId) },
   });
 
-  it("unexpected probe failure aborts parallel siblings and ignores late progress", async () => {
-    const pending = deferred<void>();
+  await startSession(host, ctx);
+  await host.fireCommand("feedback quick", ctx);
 
-    const h = await harness({
-      unverified: true,
-      probeGeneration: async (_registry, candidate) => {
-        if (candidate.model === "quick") throw new Error("synthetic failure");
-        await pending.promise;
+  const feedback = feedbackOf(host);
 
-        return { target: candidate, passed: true, reason: "ok", milliseconds: 1 };
-      },
-    });
+  assert.equal(feedback.length, 1);
+  assert.equal(feedback[0]?.schemaVersion, 1);
+  assert.equal(feedback[0]?.decisionId, decisionId);
+  assert.equal(feedback[0]?.expectedRoute, "quick");
+  assert.equal(feedback[0]?.skipped, false);
+  assert.ok(notifications.some((message) => message.includes("Routing behavior is unchanged")));
+  assert.deepEqual(probes, []);
+  assert.deepEqual(models, []);
+});
 
-    await h.command("doctor");
-    assert.equal(h.probes.length, 3);
-    assert.ok(h.probes.every((args) => args[2].aborted));
-    assert.match(h.notifications.at(-1)!, /^pi-typesafe-router: ❌/);
-    assert.equal(h.widgets.at(-1)?.[1], undefined);
-    const before = [h.statuses.length, h.widgets.length, h.notifications.length];
-    pending.resolve();
-    await nextTurn();
-    assert.deepEqual([h.statuses.length, h.widgets.length, h.notifications.length], before);
-    await h.command("on");
-    assert.match(h.notifications.at(-1)!, /blocked/i);
+test("a skipped feedback names no route and is still recorded", async () => {
+  const { host, ctx } = harness({
+    context: { branch: branchWithDecision("0123456789abcdef") },
   });
 
-  it("one failed route blocks all routing even when the selected route passed", async () => {
-    const h = await harness({
-      unverified: true,
-      probeGeneration: async (_registry, candidate) => ({
-        target: candidate,
-        passed: candidate.model !== "deep",
-        reason: "synthetic",
-        milliseconds: 0,
-      }),
-    });
+  await startSession(host, ctx);
+  await host.fireCommand("feedback skip", ctx);
 
-    await h.command("doctor");
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, []);
-    assert.match(h.notifications.join("\n"), /deep/);
+  const feedback = feedbackOf(host);
+
+  assert.equal(feedback.length, 1);
+  assert.equal(feedback[0]?.skipped, true);
+  assert.equal(feedback[0]?.expectedRoute, undefined);
+});
+
+test("feedback without an eligible decision is refused instead of guessed", async () => {
+  const { host, ctx, notifications } = harness();
+  await startSession(host, ctx);
+  await host.fireCommand("feedback deep", ctx);
+
+  assert.deepEqual(feedbackOf(host), []);
+  assert.ok(
+    notifications.some((message) => message.includes("No routing decision in this session")),
+  );
+});
+
+test("feedback accepts only a class or skip, never free text", async () => {
+  const { host, ctx, notifications } = harness({
+    context: { branch: branchWithDecision("0123456789abcdef") },
   });
 
-  it("one valid fallback per route unlocks, deduplicates probes and skips failed first candidates", async () => {
-    const chain = [target("quick"), target("next")];
+  await startSession(host, ctx);
+  await host.fireCommand("feedback maybe", ctx);
 
-    const h = await harness({
-      unverified: true,
-      config: config({ routes: { quick: chain, standard: chain, deep: chain } }),
-      probeGeneration: async (_registry, candidate) => ({
-        target: candidate,
-        passed: candidate.model === "next",
-        reason: "synthetic",
-        milliseconds: 0,
-      }),
-    });
+  assert.deepEqual(feedbackOf(host), []);
+  assert.ok(notifications.some((message) => message.includes("feedback")));
+});
 
-    await h.command("doctor");
-    assert.deepEqual(
-      h.probes.map((args) => args[1].model),
-      ["quick", "next"],
-    );
-    assert.ok(h.probes.every((args) => args[3] === 15000));
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.deepEqual(h.selections, ["next"]);
-    assert.equal(h.probes.length, 2, "routing must use proof, not run probes again");
+test("no session entry carries prompt text or a credential value", async () => {
+  const plantedKey = "sk-live-PLANTED-CREDENTIAL-9999";
+  const plantedPrompt = "rotate the billing database credential for the staging cluster";
+  // Other tests in this file rely on the ambient key, so restore whatever was here before.
+  const savedKey = process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_API_KEY = plantedKey;
+
+  try {
+    const { host, ctx } = harness({ config: automatic(), classify: classifier("deep") });
+    await startSession(host, ctx);
+    await host.fire("input", inputEvent({ text: plantedPrompt }), ctx);
+    await host.fire("message_end", routedMessage("provider-deep", "deep-model"), ctx);
+    await host.fire("agent_settled", { type: "agent_settled" }, ctx);
+
+    const serialized = JSON.stringify(host.entries);
+
+    assert.ok(host.entries.some((entry) => entry.customType === `${NAME}-decision`));
+    assert.ok(host.entries.some((entry) => entry.customType === `${NAME}-outcome`));
+    assert.equal(serialized.includes("rotate the billing"), false, "prompt text leaked");
+    assert.equal(serialized.includes(plantedKey), false, "credential value leaked");
+  } finally {
+    if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = savedKey;
+  }
+});
+
+/** Write one policy artifact to a temporary file a configuration can point at. */
+async function writePolicyFile(policy: RoutingPolicy, t: { after(callback: () => void): void }) {
+  const directory = await mkdtemp(join(tmpdir(), "router-policy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "policy.json");
+  await writeFile(path, JSON.stringify(policy));
+
+  return path;
+}
+
+/** One valid external rubric artifact; each call returns a fresh object. */
+function policyArtifact(id: string, question = "task_class"): RoutingPolicy {
+  return {
+    version: 1,
+    id,
+    question,
+    type: "choice",
+    instructions: "Classify the request under the external rubric.",
+    criteria: { quick: "Quick.", standard: "Standard.", deep: "Deep.", uncertain: "Uncertain." },
+  };
+}
+
+test("an external policyPath is the rubric the classifier sends and the hash a decision records", async (t) => {
+  const external = policyArtifact("external-rubric", "external_class");
+
+  const path = await writePolicyFile(external, t);
+  let seen: RoutingPolicy | undefined;
+
+  const { host, ctx } = harness({
+    config: parseConfig({ ...baseConfigInput(), mode: "auto", policyPath: path }),
+    classify: async (_backend, _state, call) => {
+      seen = call.policy;
+
+      return classification("quick");
+    },
   });
 
-  it("a passed but locally unavailable candidate cannot establish readiness", async () => {
-    const h = await harness({ unverified: true, available: [model("quick"), model("standard")] });
-    await h.command("doctor");
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.deepEqual(h.selections, []);
-    assert.equal(h.classifications.length, 1);
+  await startSession(host, ctx);
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+
+  assert.equal(seen?.id, external.id);
+  assert.equal(seen?.question, external.question);
+  assert.equal(decisionOf(host)?.provenance.policyId, external.id);
+});
+
+test("a policy rewritten between sessions is reloaded with the new rubric", async (t) => {
+  const path = await writePolicyFile(policyArtifact("rubric-one"), t);
+  const seen: string[] = [];
+
+  const { host, ctx } = harness({
+    config: parseConfig({ ...baseConfigInput(), mode: "auto", policyPath: path }),
+    classify: async (_backend, _state, call) => {
+      seen.push(call.policy.id);
+
+      return classification("quick");
+    },
   });
 
-  for (const change of [
-    "mapping",
-    "classifier reference",
-    "provider reference",
-    "auth source",
-    "descriptor",
-  ] as const)
-    it(`${change} changes invalidate proof before input without classifying`, async () => {
-      let disk = config();
-      const h = await harness({ load: async () => disk });
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  assert.deepEqual(seen, ["rubric-one"]);
+  assert.equal(decisionOf(host)?.provenance.policyId, "rubric-one");
 
-      if (change === "mapping")
-        disk = config({ routes: { ...disk.routes, quick: [target("next")] } });
+  // The applied rubric is file state; a reload must pick up the rewrite rather than
+  // keeping the rubric the previous session read.
+  await writeFile(path, JSON.stringify(policyArtifact("rubric-two")));
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
 
-      if (change === "classifier reference")
-        disk = config({
-          backend: {
-            type: "typesafe",
-            model: "jev-1.13.0",
-            auth: { source: "env", variable: "OTHER_FIXTURE_KEY" },
-          },
-        });
+  assert.deepEqual(seen, ["rubric-one", "rubric-two"]);
+  assert.equal(decisionOf(host)?.provenance.policyId, "rubric-two");
+});
 
-      if (change === "provider reference")
-        h.ctx.modelRegistry.getRegisteredProviderConfig = () => ({
-          apiKey: "CHANGED_KEY_REFERENCE",
-        });
+test("a policy that becomes unreadable on reload disables routing", async (t) => {
+  const path = await writePolicyFile(policyArtifact("rubric-one"), t);
 
-      if (change === "auth source")
-        h.ctx.modelRegistry.getProviderAuthStatus = () => ({
-          configured: true,
-          source: "models_json_key",
-        });
-
-      if (change === "descriptor")
-        h.ctx.modelRegistry.getAll()[0].baseUrl = "https://changed.invalid";
-      assert.deepEqual(await h.input(), { action: "handled" });
-      assert.equal(h.classifications.length, 0);
-      assert.deepEqual(h.selections, []);
-      assert.match(h.notifications.at(-1)!, /doctor/i);
-      assert.ok(!JSON.stringify(h.entries).includes("CHANGED_KEY_REFERENCE"));
-    });
-
-  it("on rechecks disk before enabling a previously verified off session", async () => {
-    let disk = config({ mode: "off" });
-    const h = await harness({ load: async () => disk });
-    disk = config({ mode: "off", minConfidence: 0.9 });
-    await h.command("on");
-    assert.match(h.notifications.at(-1)!, /doctor/i);
-    assert.deepEqual(await h.input(), { action: "continue" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
+  const { host, ctx, classified, notifications } = harness({
+    config: parseConfig({ ...baseConfigInput(), mode: "auto", policyPath: path }),
+    classify: classifier("quick"),
   });
 
-  it("input verification reads disk abortably and ignores late config", async () => {
-    let pause = false;
-    const entered = deferred<void>();
-    const pending = deferred<RouterConfig>();
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+  assert.equal(classified(), 1);
 
-    const h = await harness({
-      load: async () => {
-        if (!pause) return config();
-        entered.resolve();
+  await writeFile(path, "{ not a policy");
+  await startSession(host, ctx);
 
-        return pending.promise;
-      },
-    });
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 1, "a reloaded bad policy must not fall back to the bundled rubric");
+  assert.ok(notifications.some((message) => message.includes("Invalid router configuration")));
+});
 
-    pause = true;
-    const input = h.input();
-    await entered.promise;
-    await h.command("off");
-    assert.deepEqual(await input, { action: "handled" });
-    pending.resolve(config());
-    await nextTurn();
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
+test("an unreadable policyPath disables routing instead of falling back to the bundled artifact", async () => {
+  const { host, ctx, classified, notifications } = harness({
+    config: parseConfig({
+      ...baseConfigInput(),
+      mode: "auto",
+      policyPath: "/nonexistent/pi-typesafe-router-policy.json",
+    }),
+    classify: classifier("quick"),
   });
 
-  it("successful generation probes do not override a failed classifier check", async () => {
-    const h = await harness({
-      unverified: true,
-      classify: async () => {
-        throw new ClassifierError("credentials");
-      },
-    });
+  await startSession(host, ctx);
+  assert.deepEqual(await host.fire("input", inputEvent(), ctx), { action: "continue" });
+  assert.equal(classified(), 0, "an unreadable policy must not fall back to the bundled rubric");
+  assert.ok(notifications.some((message) => message.includes("Invalid router configuration")));
+});
 
-    await h.command("doctor");
-    assert.equal(h.probes.length, 3);
-    await h.command("on");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.classifications.length, 1);
-    assert.deepEqual(h.selections, []);
+test("a live doctor persists proofs that a reload restores without re-probing", async () => {
+  const { host, ctx, probes } = harness({
+    config: automatic(),
+    classify: classifier("quick"),
+    branchFromEntries: true,
   });
 
-  it("a separate classifier credential reference invalidates generation readiness", async () => {
-    const h = await harness({
-      config: config({
-        backend: {
-          type: "typesafe",
-          model: "jev-1.13.0",
-          auth: { source: "pi", provider: "classifier-fixture" },
-        },
-      }),
-    });
+  await startSession(host, ctx);
+  await host.fireCommand("doctor live", ctx);
 
-    h.ctx.modelRegistry.getRegisteredProviderConfig = (provider) => ({
-      apiKey: provider === "classifier-fixture" ? "changed-reference" : SECRET,
-    });
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
+  assert.ok(
+    verificationOf(host).some((entry) => entry.verified),
+    "a successful live doctor must persist its proofs",
+  );
+
+  const probesAfterDoctor = probes.length;
+  // A reload clears the in-memory store and rebuilds it from the session branch.
+  await startSession(host, ctx);
+  await host.fire("input", inputEvent(), ctx);
+
+  assert.equal(probes.length, probesAfterDoctor, "restored proofs must not be re-probed");
+});
+
+test("a reload tombstones persisted proofs whose fingerprint no longer matches", async () => {
+  const { host, ctx } = harness({
+    config: automatic(),
+    classify: classifier("quick"),
+    branchFromEntries: true,
   });
 
-  it("scope changes block routing when any route loses its verified candidate", async () => {
-    const h = await harness();
-    h.ctx.scopedModels = [
-      { model: model("quick"), thinkingLevel: "off" },
-      { model: model("standard"), thinkingLevel: "off" },
-    ];
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.match(h.notifications.at(-1)!, /deep/);
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-  });
+  await startSession(host, ctx);
+  await host.fireCommand("doctor live", ctx);
+  const before = host.entries.length;
 
-  it("context growth rechecks eligibility of every verified route", async () => {
-    const h = await harness({
-      models: [model("quick"), model("standard"), { ...model("deep"), contextWindow: 30_000 }],
-    });
+  // Rotate a registry fact every target fingerprint covers, then reload the session.
+  ctx.modelRegistry.getRegisteredProviderConfig = () => ({ apiKey: "changed-reference" });
+  await startSession(host, ctx);
 
-    h.ctx.getContextUsage = () => ({ tokens: 35_000, contextWindow: 128_000, percent: 27 });
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.match(h.notifications.at(-1)!, /deep/);
-    assert.equal(h.classifications.length, 0);
-    assert.deepEqual(h.selections, []);
-  });
-
-  it("off preserves completed proof and a new session clears it", async () => {
-    const h = await harness();
-    await h.command("off");
-    await h.command("on");
-    await h.input();
-    assert.deepEqual(h.selections, ["quick"]);
-    await h.emit("session_start");
-    assert.deepEqual(await h.input(), { action: "handled" });
-    assert.equal(h.classifications.length, 1);
-  });
-
-  for (const interruption of ["off", "shutdown", "disk change"] as const)
-    it(`${interruption} during generation probe cannot publish stale readiness`, async () => {
-      const entered = deferred<void>();
-      const pending = deferred<Awaited<ReturnType<typeof probeGeneration>>>();
-      let disk = config();
-
-      const h = await harness({
-        unverified: true,
-        load: async () => disk,
-        probeGeneration: async (_registry, candidate) => {
-          if (candidate.model === "quick") {
-            entered.resolve();
-
-            return pending.promise;
-          }
-
-          return { target: candidate, passed: true, reason: "ok", milliseconds: 0 };
-        },
-      });
-
-      const doctor = h.command("doctor");
-      await entered.promise;
-
-      if (interruption === "off") await h.command("off");
-      else if (interruption === "shutdown") await h.emit("session_shutdown");
-      else disk = config({ minConfidence: 0.9 });
-
-      if (interruption !== "disk change") {
-        await doctor;
-        assert.equal(h.probes[0][2].aborted, true);
-      }
-
-      const widgetsBefore = h.widgets.length;
-      pending.resolve({ target: target("quick"), passed: true, reason: "ok", milliseconds: 0 });
-      await doctor;
-      await nextTurn();
-      assert.equal(h.widgets.at(-1)?.[1], undefined);
-
-      if (interruption !== "disk change") assert.equal(h.widgets.length, widgetsBefore);
-
-      if (interruption === "shutdown") await h.emit("session_start");
-      await h.command("on");
-      await h.input();
-      assert.deepEqual(h.selections, []);
-      assert.match(h.notifications.join("\n"), /doctor/i);
-    });
+  const appended = verificationOf(host);
+  assert.equal(appended.at(-1)?.verified, false, "a stale fingerprint must be tombstoned");
+  assert.ok(
+    host.entries.slice(before).some((entry) => entry.customType === `${NAME}-verification`),
+    "the tombstone is a new session entry",
+  );
 });

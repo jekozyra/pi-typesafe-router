@@ -18,22 +18,22 @@ const credentials = {
 };
 
 const passed = `pi-typesafe-router: ✅
+generation proofs: 3 of 3 configured target(s) verified for this session
 classifier:
   typesafe / jev-1.13.0
   ✅ passed in 50 ms
 routes:
   quick:
-    openrouter/openai/gpt-5.6-luna
+    openrouter/openai/gpt-5.6-luna (thinking: high)
     ✅ passed in 100 ms
   standard:
-    openrouter/openai/gpt-5.6-luna
+    openrouter/openai/gpt-5.6-luna (thinking: high)
     ✅ passed in 100 ms
   deep:
-    openrouter/openai/gpt-5.6-luna
+    openrouter/openai/gpt-5.6-luna (thinking: high)
     ✅ passed in 100 ms
 pi-typesafe-router: status
 routing: off
-generation verification: verified at 2026-09-18T00:00:00Z; availability is a snapshot, not a guarantee
 `;
 
 describe("live E2E harness safeguards (offline)", () => {
@@ -58,7 +58,9 @@ describe("live E2E harness safeguards (offline)", () => {
 
     for (const config of configs) {
       for (const chain of Object.values(config.routes))
-        assert.deepEqual(chain, [{ provider: "openrouter", model: "openai/gpt-5.6-luna" }]);
+        assert.deepEqual(chain, [
+          { provider: "openrouter", model: "openai/gpt-5.6-luna", thinking: "high" },
+        ]);
 
       const { backend: _backend, ...policy } = config;
       const { backend: _firstBackend, ...firstPolicy } = configs[0];
@@ -112,7 +114,7 @@ describe("live E2E harness safeguards (offline)", () => {
     assert.ok(!result.stderr.includes("E2E_UNEXPECTED_NETWORK"));
     assert.match(result.stderr, /pi-typesafe-router: ❌/);
     assert.match(result.stderr, /failed in \d+ ms \(credentials\)/);
-    assert.match(result.stderr, /generation verification: not verified/);
+    assert.match(result.stderr, /generation proofs: 0 of \d+ configured target\(s\) verified/);
     assert.throws(() => assertDoctorPassed(result.stderr, "typesafe", "jev-1.13.0"));
   });
 
@@ -122,7 +124,7 @@ describe("live E2E harness safeguards (offline)", () => {
     for (const broken of [
       passed.replace("pi-typesafe-router: ✅", "pi-typesafe-router: ❌"),
       passed.replace("✅ passed in 50 ms", "❌ failed in 50 ms (HTTP 401)"),
-      passed.replace("generation verification: verified at", "generation verification: stale at"),
+      passed.replace(/^generation proofs: 3 of 3/m, "generation proofs: 0 of 3"),
       passed.replace("  deep:", "  missing:"),
       passed.replaceAll("openai/gpt-5.6-luna", "some-other-model"),
       passed.replace("routing: off", "routing: auto"),

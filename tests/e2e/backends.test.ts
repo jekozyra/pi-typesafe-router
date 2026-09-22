@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { runDoctor } from "./doctor.ts";
 import { classify } from "../../src/classifier.ts";
+import { POLICY } from "../../src/policy.ts";
 import { ClassifierError, TASK_CLASSES } from "../../src/types.ts";
 import { assertDoctorPassed, credentialVariables, liveConfig } from "./support.ts";
 
@@ -42,7 +43,7 @@ describe("live backend authentication → doctor", { concurrency: false }, () =>
             current_request: "Explain what a variable is in one sentence.",
             recent_conversation: [],
           },
-          { apiKey, signal: AbortSignal.timeout(config.timeoutMs) },
+          { apiKey, signal: AbortSignal.timeout(config.timeoutMs), policy: POLICY },
         ).catch((error) => {
           assert.fail(
             error instanceof ClassifierError

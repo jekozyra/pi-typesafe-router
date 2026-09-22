@@ -1,7 +1,7 @@
 import { estimateTokens, type ContextUsage } from "@earendil-works/pi-coding-agent";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import { z } from "zod";
-import type { ClassificationState } from "./types.ts";
+import type { ClassificationState, HistoryRole } from "./types.ts";
 
 const textBlock = z.object({ type: z.literal("text"), text: z.string() });
 
@@ -14,12 +14,20 @@ const conversationalText = z
   ])
   .catch("");
 
+/**
+ * The minimal message shape this projection reads. Pi's message union also carries entries
+ * with no `content` at all (for example a bash execution), so both fields are optional here
+ * and an unreadable one is skipped rather than rejected.
+ */
+export type HistoryMessage = { role?: string; content?: unknown };
+
 /** Project only conversational text; never inspect files, tools, or image bytes. */
 export function projectState(
   current: string,
-  history: readonly { role: string; content: unknown }[],
+  history: readonly HistoryMessage[],
   maxChars: number,
   historyMessages: number,
+  roles: readonly HistoryRole[],
 ): ClassificationState | undefined {
   if (
     !Number.isInteger(maxChars) ||
@@ -36,14 +44,20 @@ export function projectState(
   for (let i = history.length - 1; i >= 0 && recent.length < historyMessages; i--) {
     const message = history[i]!;
 
-    if (message.role !== "user" && message.role !== "assistant") continue;
+    // Narrow on the domain values instead of asserting: anything else is not projected.
+    const role = message.role;
+
+    if (role !== "user" && role !== "assistant") continue;
+
+    if (!roles.includes(role)) continue;
+
     const text = conversationalText.parse(message.content);
 
     if (!text.trim()) continue;
 
     // Stop at the first non-fitting text message: don't resurrect older context.
     if (text.length > remaining) break;
-    recent.push({ role: message.role, text });
+    recent.push({ role, text });
     remaining -= text.length;
   }
 

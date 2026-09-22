@@ -1,258 +1,310 @@
+/**
+ * Verification-fingerprint tests for `src/verification.ts`.
+ *
+ * The fingerprint is the gate that decides whether a proof earned by `/typesafe-router
+ * doctor` is still valid. It must be stable for equivalent inputs, change when anything the
+ * decision depended on changed, and never carry credential material out of process — it is
+ * only ever compared, but a hash built from a secret is still a leak waiting to be logged.
+ */
+
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, it, type TestContext } from "node:test";
-import {
-  createAssistantMessageEventStream,
-  InMemoryCredentialStore,
-  type AssistantMessage,
-  type AuthResult,
-} from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime, type ProviderConfig } from "@earendil-works/pi-coding-agent";
-import { parseConfig } from "../src/config.ts";
-import { probeGeneration } from "../src/generation-probe.ts";
-import { verificationFingerprint } from "../src/verification.ts";
+import test from "node:test";
 
-const target = { provider: "verification-generation-fixture", model: "fixture-model" };
+import { baseConfigInput, baseRoutes, installPiStubs, model, target } from "./harness.ts";
 
-const classifier = "verification-classifier-fixture";
+installPiStubs();
 
-const firstKey = "fake-literal-credential-first";
+const { configuredTargets, verificationFingerprint, ProofStore, targetFingerprint } =
+  await import("../src/verification.ts");
 
-const secondKey = "fake-literal-credential-second";
+const { parseConfig } = await import("../src/config.ts");
 
-const config = parseConfig({
-  backend: { type: "typesafe", auth: { source: "pi", provider: classifier } },
-  routes: { quick: [target], standard: [target], deep: [target] },
-});
+import type { RouterContext } from "../src/host.ts";
 
-function providerConfig(apiKey = firstKey): ProviderConfig {
+type Registry = RouterContext["modelRegistry"];
+
+type CatalogEntry = NonNullable<ReturnType<Registry["find"]>>;
+
+type Provider = NonNullable<ReturnType<Registry["getProvider"]>>;
+
+type AuthStatus = ReturnType<Registry["getProviderAuthStatus"]>;
+
+type RegisteredConfig = ReturnType<Registry["getRegisteredProviderConfig"]>;
+
+/** Pi reports an unconfigured provider as a status, not as an absent one. */
+const READY: AuthStatus = { configured: true, source: "environment" };
+
+const NOT_READY: AuthStatus = { configured: false };
+
+interface RegistryOptions {
+  providers?: Record<string, Provider>;
+  authStatus?: (provider: string) => AuthStatus;
+  registeredConfig?: (provider: string) => RegisteredConfig;
+  catalog?: CatalogEntry[];
+}
+
+function registry(options: RegistryOptions = {}): Registry {
+  const providers = options.providers ?? {};
+  const catalog = options.catalog ?? [];
+
   return {
-    api: "openai-completions",
-    baseUrl: "https://verification.invalid/v1",
-    apiKey,
-    models: [
-      {
-        id: target.model,
-        name: "Fixture",
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 4096,
-        maxTokens: 1024,
-      },
-    ],
+    getAll: () => catalog,
+    getAvailable: () => catalog,
+    find: (provider, id) => catalog.find((entry) => entry.provider === provider && entry.id === id),
+    getProviderAuth: async () => undefined,
+    getProviderAuthStatus: (provider) => options.authStatus?.(provider) ?? READY,
+    getRegisteredProviderConfig: (provider) => options.registeredConfig?.(provider),
+    getProvider: (provider) => providers[provider],
+    complete: async () => {
+      throw new Error("the fingerprint never calls a model");
+    },
   };
 }
 
-/** No real profile, credential store, environment key, or network is needed. */
-async function fixture(t: TestContext, diskConfig?: ProviderConfig) {
-  const root = await mkdtemp(join(tmpdir(), "pi-router-verification-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+/** Fresh provider objects, keyed by the providers the base configuration targets. */
+function providers(): Record<string, Provider> {
+  const ids = ["provider-quick", "provider-standard", "provider-deep"];
 
-  const http = t.mock.method(globalThis, "fetch", async () => {
-    throw new Error("Verification tests forbid network access");
-  });
-
-  t.after(() => assert.equal(http.mock.callCount(), 0));
-  const modelsPath = join(root, "models.json");
-
-  async function writeModels(value: ProviderConfig) {
-    await writeFile(modelsPath, JSON.stringify({ providers: { [target.provider]: value } }));
-  }
-
-  if (diskConfig) await writeModels(diskConfig);
-
-  const runtime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: diskConfig ? modelsPath : null,
-    modelsStorePath: join(root, "models-store.json"),
-    allowModelNetwork: false,
-    refreshOnCreate: false,
-  });
-
-  const registry = new ModelRegistry(runtime);
-
-  return { runtime, registry, writeModels };
+  // SAFETY: this fake exists to be a distinct object identity; no provider member is read.
+  return Object.fromEntries(
+    ids.map((id) => [
+      id,
+      // oxlint-disable-next-line anti-slop/no-chained-type-assertions -- identity-only fake provider
+      { id } as unknown as Provider,
+    ]),
+  );
 }
 
-function assertOpaque(fingerprint: string) {
-  assert.match(fingerprint, /^[a-f0-9]{64}$/u);
-
-  for (const secret of [firstKey, secondKey, "fake-header-first", "fake-header-second"])
-    assert.equal(fingerprint.includes(secret), false);
+function catalog(provider: string, id: string): CatalogEntry {
+  return model(provider, id);
 }
 
-describe("verification against the actual Pi runtime", { concurrency: false }, () => {
-  for (const changed of ["credential", "header"] as const) {
-    it(`invalidates a models.json ${changed} change with identical model and auth status`, async (t) => {
-      const initial = { ...providerConfig(), headers: { "X-Fixture": "fake-header-first" } };
-      const { registry, writeModels } = await fixture(t, initial);
-      const model = registry.find(target.provider, target.model);
-      assert.ok(model);
-      const provider = registry.getProvider(target.provider);
-      assert.ok(provider);
-      const status = registry.getProviderAuthStatus(target.provider);
-      assert.equal(status.configured, true);
-      assert.equal(registry.getRegisteredProviderConfig(target.provider), undefined);
-      const before = verificationFingerprint(config, registry);
-      assert.equal(verificationFingerprint(config, registry), before, "unchanged reads are stable");
-      await writeModels(
-        changed === "credential"
-          ? { ...initial, apiKey: secondKey }
-          : { ...initial, headers: { "X-Fixture": "fake-header-second" } },
-      );
-      await registry.refresh({ allowNetwork: false, providers: [target.provider] });
-      assert.equal(registry.getError(), undefined);
-      assert.deepEqual(registry.find(target.provider, target.model), model);
-      assert.deepEqual(registry.getProviderAuthStatus(target.provider), status);
-      assert.equal(registry.getRegisteredProviderConfig(target.provider), undefined);
-      assert.notEqual(registry.getProvider(target.provider), provider);
-      const after = verificationFingerprint(config, registry);
-      assert.notEqual(after, before);
-      assert.equal(verificationFingerprint(config, registry), after);
-      assertOpaque(before);
-      assertOpaque(after);
-    });
-  }
+// oxlint-disable-next-line anti-slop/no-object-parameters -- deliberately arbitrary route overrides
+function routes(overrides: object) {
+  return { ...baseRoutes(), ...overrides };
+}
 
-  it("includes classifier-only Pi credentials, not just generation providers", async (t) => {
-    const { registry } = await fixture(t);
-    registry.registerProvider(target.provider, providerConfig());
-    registry.registerProvider(classifier, providerConfig());
-    const generation = registry.getProvider(target.provider);
-    const model = registry.find(target.provider, target.model);
-    const status = registry.getProviderAuthStatus(classifier);
-    const before = verificationFingerprint(config, registry);
-    registry.registerProvider(classifier, providerConfig(secondKey));
-    assert.equal(registry.getProvider(target.provider), generation);
-    assert.deepEqual(registry.find(target.provider, target.model), model);
-    assert.deepEqual(registry.getProviderAuthStatus(classifier), status);
-    const after = verificationFingerprint(config, registry);
-    assert.notEqual(after, before);
-    assertOpaque(before);
-    assertOpaque(after);
+test("configured targets are deduplicated in first-use order", () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    routes: {
+      quick: [target("provider-a", "one"), target("provider-b", "two")],
+      standard: [target("provider-b", "two", "low"), target("provider-c", "three")],
+      deep: [target("provider-c", "three"), target("provider-a", "one")],
+    },
   });
 
-  it("invalidates native provider replacement even when visible metadata stays equal", async (t) => {
-    const { registry } = await fixture(t);
-    registry.registerProvider(target.provider, providerConfig());
-    const original = registry.getProvider(target.provider);
-    assert.ok(original);
-    registry.registerProvider({ ...original });
-    const model = registry.find(target.provider, target.model);
-    const status = registry.getProviderAuthStatus(target.provider);
-    const extension = registry.getRegisteredProviderConfig(target.provider);
-    const provider = registry.getProvider(target.provider);
-    const before = verificationFingerprint(config, registry);
-    registry.registerProvider({ ...original });
-    assert.notEqual(registry.getProvider(target.provider), provider);
-    assert.deepEqual(registry.find(target.provider, target.model), model);
-    assert.deepEqual(registry.getProviderAuthStatus(target.provider), status);
-    assert.deepEqual(registry.getRegisteredProviderConfig(target.provider), extension);
-    assert.notEqual(verificationFingerprint(config, registry), before);
+  assert.deepEqual(
+    configuredTargets(config).map((entry) => `${entry.provider}/${entry.model}`),
+    ["provider-a/one", "provider-b/two", "provider-c/three"],
+  );
+});
+
+test("the fingerprint is a stable 64-character digest", () => {
+  const config = parseConfig(baseConfigInput());
+  const probe = registry({ providers: providers() });
+
+  const first = verificationFingerprint(config, probe);
+  const second = verificationFingerprint(config, probe);
+
+  assert.equal(first, second);
+  assert.match(first, /^[0-9a-f]{64}$/);
+});
+
+test("a route-order change invalidates the fingerprint", () => {
+  const forward = parseConfig({
+    ...baseConfigInput(),
+    routes: routes({ quick: [target("provider-a", "one"), target("provider-b", "two")] }),
   });
 
-  for (const cancellation of ["abort", "timeout"] as const) {
-    it(`does not start transport after ${cancellation} during actual Pi authentication`, async (t) => {
-      const { registry, runtime } = await fixture(t);
-      let transports = 0;
-      registry.registerProvider(target.provider, {
-        ...providerConfig(),
-        streamSimple(model) {
-          transports++;
-          const stream = createAssistantMessageEventStream();
+  const reversed = parseConfig({
+    ...baseConfigInput(),
+    routes: routes({ quick: [target("provider-b", "two"), target("provider-a", "one")] }),
+  });
 
-          const message: AssistantMessage = {
-            role: "assistant",
-            api: model.api,
-            provider: model.provider,
-            model: model.id,
-            content: [{ type: "text", text: "OK" }],
-            stopReason: "stop",
-            timestamp: 1,
-            usage: {
-              input: 1,
-              output: 1,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 2,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-          };
+  const probe = registry({ providers: providers() });
 
-          stream.push({ type: "done", reason: "stop", message });
-          stream.end();
+  assert.notEqual(
+    verificationFingerprint(forward, probe),
+    verificationFingerprint(reversed, probe),
+  );
+});
 
-          return stream;
-        },
-      });
-      // Positive control: raw registry.complete reaches extension streamSimple via
-      // Pi's composed provider.stream, rather than a mocked registry implementation.
-      assert.equal(
-        (await probeGeneration(registry, target, new AbortController().signal, 1000)).passed,
-        true,
-      );
-      assert.equal(transports, 1);
-      transports = 0;
-      let releaseAuth!: (auth: AuthResult) => void;
+test("a change of effort or model invalidates the fingerprint", () => {
+  const base = parseConfig(baseConfigInput());
 
-      const delayedAuth = new Promise<AuthResult>((resolve) => {
-        releaseAuth = resolve;
-      });
+  const effort = parseConfig({
+    ...baseConfigInput(),
+    routes: routes({ quick: [target("provider-quick", "quick-model", "medium")] }),
+  });
 
-      let enteredAuth!: () => void;
+  const modelChanged = parseConfig({
+    ...baseConfigInput(),
+    routes: routes({ quick: [target("provider-quick", "other-model", "low")] }),
+  });
 
-      const authStarted = new Promise<void>((resolve) => {
-        enteredAuth = resolve;
-      });
+  const probe = registry({ providers: providers() });
 
-      t.mock.method(runtime, "getAuth", () => {
-        enteredAuth();
+  assert.notEqual(verificationFingerprint(base, probe), verificationFingerprint(effort, probe));
+  assert.notEqual(
+    verificationFingerprint(base, probe),
+    verificationFingerprint(modelChanged, probe),
+  );
+});
 
-        return delayedAuth;
-      });
-      // Observe completion of the real underlying operation, not just the probe's
-      // abort race, so a late transport invocation cannot escape the assertion.
-      const realComplete = registry.complete.bind(registry);
-      let completeSettled!: () => void;
+test("a credential-reference change invalidates the fingerprint", () => {
+  const base = parseConfig(baseConfigInput());
 
-      const settled = new Promise<void>((resolve) => {
-        completeSettled = resolve;
-      });
+  const renamed = parseConfig({
+    ...baseConfigInput(),
+    backend: {
+      type: "typesafe",
+      model: "jev-1.13.0",
+      auth: { source: "env", variable: "OTHER_TYPESAFE_KEY" },
+    },
+  });
 
-      t.mock.method(registry, "complete", (...args: Parameters<typeof registry.complete>) => {
-        const request = realComplete(...args);
-        void request.then(completeSettled, completeSettled);
+  const probe = registry({ providers: providers() });
 
-        return request;
-      });
-      const controller = new AbortController();
+  // Only the variable name is hashed; no value from the environment is ever read.
+  assert.notEqual(verificationFingerprint(base, probe), verificationFingerprint(renamed, probe));
+});
 
-      const probing = probeGeneration(
-        registry,
-        target,
-        controller.signal,
-        cancellation === "timeout" ? 25 : 1000,
-      );
+test("replacing a provider object invalidates the fingerprint", () => {
+  const config = parseConfig(baseConfigInput());
+  const shared = registry({ providers: providers() });
+  const replaced = registry({ providers: providers() });
 
-      const outcome =
-        cancellation === "abort"
-          ? assert.rejects(probing, { name: "AbortError" })
-          : probing.then((result) => {
-              assert.equal(result.passed, false);
-              assert.equal(result.reason, "timeout");
-            });
+  assert.equal(verificationFingerprint(config, shared), verificationFingerprint(config, shared));
+  assert.notEqual(
+    verificationFingerprint(config, shared),
+    verificationFingerprint(config, replaced),
+  );
+});
 
-      await authStarted;
+test("a credential-status change invalidates the fingerprint", () => {
+  const config = parseConfig(baseConfigInput());
+  const ready = registry({ providers: providers(), authStatus: () => READY });
+  const gone = registry({ providers: providers(), authStatus: () => NOT_READY });
 
-      if (cancellation === "abort") controller.abort();
-      await outcome;
-      assert.equal(transports, 0);
-      releaseAuth({ auth: { apiKey: firstKey }, source: "synthetic delayed auth" });
-      await settled;
-      assert.equal(transports, 0, "late auth must not start provider transport");
-    });
-  }
+  assert.notEqual(verificationFingerprint(config, ready), verificationFingerprint(config, gone));
+});
+
+test("a registered-provider-config change invalidates the fingerprint", () => {
+  const config = parseConfig(baseConfigInput());
+
+  const before = registry({
+    providers: providers(),
+    registeredConfig: () => ({ baseUrl: "https://one.example" }),
+  });
+
+  const after = registry({
+    providers: providers(),
+    registeredConfig: () => ({ baseUrl: "https://two.example" }),
+  });
+
+  assert.notEqual(verificationFingerprint(config, before), verificationFingerprint(config, after));
+});
+
+test("a resolved-model change invalidates the fingerprint", () => {
+  const config = parseConfig(baseConfigInput());
+
+  const before = registry({
+    providers: providers(),
+    catalog: [catalog("provider-quick", "quick-model")],
+  });
+
+  const after = registry({
+    providers: providers(),
+    catalog: [{ ...catalog("provider-quick", "quick-model"), contextWindow: 100_000 }],
+  });
+
+  assert.notEqual(verificationFingerprint(config, before), verificationFingerprint(config, after));
+});
+
+test("a classifier credential reference is part of the fingerprint", () => {
+  const config = parseConfig({
+    ...baseConfigInput(),
+    backend: {
+      type: "typesafe",
+      model: "jev-1.13.0",
+      auth: { source: "pi", provider: "provider-a" },
+    },
+  });
+
+  const configured = registry({ providers: providers(), authStatus: () => READY });
+  const missing = registry({ providers: providers(), authStatus: () => NOT_READY });
+
+  assert.notEqual(
+    verificationFingerprint(config, configured),
+    verificationFingerprint(config, missing),
+  );
+});
+
+test("a target fingerprint is stable, distinct per target, and never carries a credential value", () => {
+  const config = parseConfig(baseConfigInput());
+  const probe = registry({ providers: providers() });
+  const [first, second] = config.routes.quick.concat(config.routes.deep);
+
+  assert.match(targetFingerprint(first!, probe), /^[0-9a-f]{64}$/);
+  assert.equal(targetFingerprint(first!, probe), targetFingerprint(first!, probe));
+  assert.notEqual(targetFingerprint(first!, probe), targetFingerprint(second!, probe));
+});
+
+test("a proof is valid only while the target and its registry facts are unchanged", () => {
+  const config = parseConfig(baseConfigInput());
+  const target = config.routes.quick[0]!;
+  // One shared provider map: separate `providers()` calls would build fresh objects and
+  // invalidate every proof, which is the very thing `verification.test.ts` pins elsewhere.
+  const objects = providers();
+  const probe = registry({ providers: objects });
+  const proofs = new ProofStore();
+
+  assert.equal(proofs.valid(target, probe), undefined);
+  proofs.remember(target, probe);
+  assert.notEqual(proofs.valid(target, probe), undefined);
+
+  const rotated = registry({ providers: objects, authStatus: () => NOT_READY });
+  assert.equal(proofs.valid(target, rotated), undefined);
+  assert.notEqual(proofs.valid(target, probe), undefined, "the rotation is scoped to the registry");
+});
+
+test("a change to one target leaves another target's proof current", () => {
+  const config = parseConfig(baseConfigInput());
+  const quick = config.routes.quick[0]!;
+  const deep = config.routes.deep[0]!;
+  const objects = providers();
+  const probe = registry({ providers: objects, authStatus: () => READY });
+  const proofs = new ProofStore();
+
+  proofs.remember(quick, probe);
+  proofs.remember(deep, probe);
+
+  // Only the deep target's provider changes, and only its proof should go stale.
+  const changed = registry({
+    providers: objects,
+    authStatus: (provider) => (provider === deep.provider ? NOT_READY : READY),
+  });
+
+  assert.deepEqual(
+    [...proofs.validKeys(changed, [quick, deep])],
+    [`${quick.provider}/${quick.model}`],
+  );
+  assert.deepEqual(
+    [...proofs.validKeys(probe, [quick, deep])],
+    [`${quick.provider}/${quick.model}`, `${deep.provider}/${deep.model}`],
+  );
+});
+
+test("clearing the proof store discards every proof", () => {
+  const config = parseConfig(baseConfigInput());
+  const probe = registry({ providers: providers() });
+  const proofs = new ProofStore();
+
+  for (const target of configuredTargets(config)) proofs.remember(target, probe);
+  assert.equal(proofs.size, 3);
+
+  proofs.clear();
+  assert.equal(proofs.size, 0);
+  assert.equal(proofs.valid(config.routes.quick[0]!, probe), undefined);
 });

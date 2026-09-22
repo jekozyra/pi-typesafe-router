@@ -64,14 +64,18 @@ export function assertDoctorPassed(output: string, backend: BackendName, model: 
 
   for (const route of ["quick", "standard", "deep"])
     assert.ok(
-      output.includes(`  ${route}:\n    openrouter/openai/gpt-5.6-luna\n    ✅ passed in `),
+      output.includes(
+        `  ${route}:\n    openrouter/openai/gpt-5.6-luna (thinking: high)\n    ✅ passed in `,
+      ),
       `${backend}: ${route} did not pass the Luna generation probe`,
     );
 
   assert.ok(!output.includes("not routable:"), `${backend}: a route is locally ineligible`);
   assert.ok(
-    /^generation verification: verified at /m.test(output),
-    `${backend}: session verification was not granted`,
+    /^generation proofs: [1-9]\d* of \d+ configured target\(s\) verified for this session$/m.test(
+      output,
+    ),
+    `${backend}: doctor did not record a generation proof`,
   );
   assert.ok(/^routing: off(?: .*)?$/m.test(output), `${backend}: doctor did not preserve off mode`);
   assert.ok(!/^routing: (?:auto|shadow)/m.test(output), `${backend}: diagnostics enabled routing`);

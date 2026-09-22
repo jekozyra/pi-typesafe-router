@@ -35,13 +35,22 @@ export type Backend =
     }
   | { type: "openrouter"; model: "typesafe/jev-1.13"; auth: CredentialSource };
 
+export const HISTORY_ROLES = ["user", "assistant"] as const;
+
+export type HistoryRole = (typeof HISTORY_ROLES)[number];
+
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export interface Target {
   provider: string;
   model: string;
+  /** Thinking level applied after this target is selected. */
+  thinking: ThinkingLevel;
 }
 
-export interface RouterConfig {
-  version: 1;
+export interface RouterConfigCommon {
   mode: Mode;
   allowHeadless: boolean;
   backend: Backend;
@@ -54,6 +63,36 @@ export interface RouterConfig {
   routes: Record<Route, Target[]>;
   defaultRoute: Route;
   uncertainRoute: Route;
+  /**
+   * Absolute path to an external classifier rubric. Omitted means the `policy.json` bundled
+   * beside the extension is used. The file is validated with the same strict schema, and an
+   * unreadable or invalid file disables routing rather than falling back silently.
+   */
+  policyPath?: string;
+}
+
+/** Config version 1: the historical projection, which disclosed assistant text too. */
+export interface RouterConfigV1 extends RouterConfigCommon {
+  version: 1;
+}
+
+/** Config version 2: an explicit projection policy, user-only by default. */
+export interface RouterConfigV2 extends RouterConfigCommon {
+  version: 2;
+  historyRoles: HistoryRole[];
+}
+
+export type RouterConfig = RouterConfigV1 | RouterConfigV2;
+
+/**
+ * The roles a config projects into classifier state.
+ *
+ * Version 1 predates the setting and keeps its user-and-assistant behavior so an existing
+ * file is not silently reinterpreted. Version 2 states the policy in the file; the generated
+ * Home configuration and `/typesafe-router setup` both choose user-only.
+ */
+export function historyRoles(config: RouterConfig): readonly HistoryRole[] {
+  return config.version === 2 ? config.historyRoles : ["user", "assistant"];
 }
 
 export interface ClassificationState {
@@ -76,21 +115,42 @@ export type ClassifierFailureCode =
   | "cancelled"
   | "network"
   | "invalid-response"
+  | "model-mismatch"
   | "http";
 
+// Explicit fields rather than constructor parameter properties: parameter properties are not
+// erasable syntax, so Node's strip-only TypeScript mode (the offline test runner) rejects them.
 export class ClassifierError extends Error {
-  constructor(
-    public readonly code: ClassifierFailureCode,
-    public readonly status?: number,
-  ) {
+  readonly code: ClassifierFailureCode;
+  readonly status?: number;
+
+  constructor(code: ClassifierFailureCode, status?: number) {
     super(status === undefined ? `Classifier ${code}` : `Classifier ${code} (HTTP ${status})`);
     this.name = "ClassifierError";
+    this.code = code;
+    this.status = status;
   }
+}
+
+/**
+ * The validated classifier rubric: the instructions and criteria sent to the backend, plus
+ * the question key that carries them. Produced from the bundled artifact or a config's
+ * `policyPath`, never hard-coded in the transport.
+ */
+export interface RoutingPolicy {
+  version: 1;
+  id: string;
+  question: string;
+  type: "choice";
+  instructions: string;
+  criteria: Record<TaskClass, string>;
 }
 
 export interface ClassifyOptions {
   signal: AbortSignal;
   apiKey: string;
+  /** The rubric this call must send, resolved from the applied configuration. */
+  policy: RoutingPolicy;
 }
 
 export type Classify = (

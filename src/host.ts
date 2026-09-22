@@ -28,7 +28,14 @@ export type RouterContext = Pick<
   >;
   ui: Pick<
     ExtensionContext["ui"],
-    "notify" | "setStatus" | "setWidget" | "confirm" | "onTerminalInput" | "select" | "input"
+    | "notify"
+    | "setStatus"
+    | "setWidget"
+    | "confirm"
+    | "onTerminalInput"
+    | "select"
+    | "input"
+    | "setEditorText"
   >;
 };
 
@@ -49,7 +56,7 @@ export type RouterEvents = {
     ? {
         type: K;
         message: Pick<MessageEndEvent["message"], "role"> &
-          Partial<Pick<AssistantMessage, "provider" | "model" | "stopReason">>;
+          Partial<Pick<AssistantMessage, "provider" | "model" | "stopReason" | "usage">>;
       }
     : Extract<ExtensionEvent, { type: K }>;
 };
@@ -69,7 +76,12 @@ type RouterHook<K extends RouterHookName> = (
 
 export type RouterAPI = Pick<
   ExtensionAPI,
-  "appendEntry" | "getAllTools" | "getActiveTools" | "sendUserMessage" | "setModel"
+  | "appendEntry"
+  | "getAllTools"
+  | "getActiveTools"
+  | "sendUserMessage"
+  | "setModel"
+  | "setThinkingLevel"
 > & {
   on<K extends RouterHookName>(name: K, hook: RouterHook<K>): void;
   registerCommand(

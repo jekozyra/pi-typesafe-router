@@ -29,7 +29,12 @@ const initialId = "initial-and-fallback";
 const dummyKey = "integration-dummy-key-not-a-secret";
 
 /** Real Pi loader/session/provider plumbing; only generation and HTTP are synthetic. */
-async function fixture(t: TestContext, failGeneration = false, verified = true) {
+async function fixture(
+  t: TestContext,
+  failGeneration = false,
+  verified = true,
+  policyPath?: string,
+) {
   let doctorComplete = false;
   const root = await mkdtemp(join(tmpdir(), "pi-typesafe-router-sdk-"));
   const cwd = join(root, "project");
@@ -65,19 +70,27 @@ async function fixture(t: TestContext, failGeneration = false, verified = true) 
 
   await mkdir(cwd);
   await mkdir(agentDir);
-  const chain = [selectedId, initialId].map((model) => ({ provider, model }));
+
+  const chain = [selectedId, initialId].map((model) => ({
+    provider,
+    model,
+    thinking: "low" as const,
+  }));
+
+  const baseConfig = {
+    version: 1,
+    mode: "auto",
+    allowHeadless: true,
+    backend: { type: "typesafe", auth: { source: "env", variable: "TEST_TYPESAFE_KEY" } },
+    routes: { quick: chain, standard: chain, deep: chain },
+    defaultRoute: "standard",
+    uncertainRoute: "deep",
+    outputReserveTokens: 256,
+  };
+
   await writeFile(
     join(agentDir, "typesafe-router.json"),
-    JSON.stringify({
-      version: 1,
-      mode: "auto",
-      allowHeadless: true,
-      backend: { type: "typesafe", auth: { source: "env", variable: "TEST_TYPESAFE_KEY" } },
-      routes: { quick: chain, standard: chain, deep: chain },
-      defaultRoute: "standard",
-      uncertainRoute: "deep",
-      outputReserveTokens: 256,
-    }),
+    JSON.stringify(policyPath === undefined ? baseConfig : { ...baseConfig, policyPath }),
   );
 
   const modelRuntime = await ModelRuntime.create({
@@ -96,7 +109,7 @@ async function fixture(t: TestContext, failGeneration = false, verified = true) 
     models: [selectedId, initialId].map((id) => ({
       id,
       name: id,
-      reasoning: false,
+      reasoning: true,
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,
@@ -260,21 +273,37 @@ async function fixture(t: TestContext, failGeneration = false, verified = true) 
 // These tests mutate process env and fetch. Keep them serial; node:test isolates
 // other test files in separate processes under the project's test command.
 describe("real Pi SDK integration", { concurrency: false }, () => {
-  it("the actual default extension blocks configured auto mode until verified", async (t) => {
+  it("an unverified auto-mode prompt continues on the current model instead of being dropped", async (t) => {
     const f = await fixture(t, false, false);
-    await f.session.prompt("Unverified input must not generate.");
-    assert.deepEqual(f.generations, []);
-    assert.equal(f.session.messages.length, 0);
-    assert.equal(f.http.mock.callCount(), 0);
+    const before = f.records().length;
+    await f.session.prompt("Unverified input continues on the current model.");
+    // A classifier fault fails open: the prompt runs on the model Pi already selected, and
+    // the route's configured effort is never applied.
+    assert.deepEqual(f.generations, [{ provider, model: initialId }]);
+    assert.equal(f.session.thinkingLevel, "off");
+    assert.equal(f.session.messages.filter((message) => message.role === "user").length, 1);
+    assert.equal(f.http.mock.callCount(), 0, "a missing key must short-circuit before HTTP");
     assert.deepEqual(f.errors, []);
+
+    // The fallback is recorded, never silent.
+    const recordData = JSON.stringify(
+      f
+        .records()
+        .slice(before)
+        .map((entry) => entry.data),
+    );
+
+    assert.ok(recordData.includes("classifier-failure"), "the fallback must be recorded");
   });
-  it("changing the classifier auth reference on disk blocks a verified session", async (t) => {
+  it("a disk credential-reference change does not reach the applied configuration before a reload", async (t) => {
     const f = await fixture(t);
     const contents = await readFile(f.configPath, "utf8");
     await writeFile(f.configPath, contents.replace("TEST_TYPESAFE_KEY", "CHANGED_TYPESAFE_KEY"));
-    await f.session.prompt("Do not classify or generate after credential reference changes.");
-    assert.deepEqual(f.generations, []);
-    assert.equal(f.session.messages.length, 0);
+    // Routing uses the configuration applied at session_start/doctor; a manual edit is picked
+    // up by the next /reload or doctor run, not mid-session.
+    await f.session.prompt("The applied configuration still governs this turn.");
+    assert.deepEqual(f.generations, [{ provider, model: selectedId }]);
+    assert.equal(f.session.messages.filter((message) => message.role === "user").length, 1);
     assert.equal(f.http.mock.callCount(), 0);
     assert.deepEqual(f.errors, []);
   });
@@ -282,9 +311,12 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
   it("loads the extension and selects the default route's first eligible model before generation", async (t) => {
     const f = await fixture(t);
     assert.equal(f.session.model?.id, initialId);
+    assert.equal(f.session.thinkingLevel, "off", "Pi's initial level is not the route's");
     const before = f.records().length;
     await f.session.prompt("Explain a small function.");
     assert.equal(f.session.model?.id, selectedId);
+    // The route's own thinking level is applied to the session, not left at the prior effort.
+    assert.equal(f.session.thinkingLevel, "low");
     assert.deepEqual(f.generations, [{ provider, model: selectedId }]);
     const appended = f.records().slice(before);
     assert.ok(appended.length > 0, "routing must append a custom decision entry");
@@ -341,6 +373,46 @@ describe("real Pi SDK integration", { concurrency: false }, () => {
     assert.deepEqual(users[0]?.content, [{ type: "text", text: prompt }]);
     assert.equal(f.sendUserMessage.mock.callCount(), 0);
     assert.equal(f.http.mock.callCount(), 0);
+    assert.deepEqual(f.errors, []);
+  });
+
+  it("applies the configured external policyPath instead of the bundled rubric", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-typesafe-router-policy-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const policyPath = join(root, "policy.json");
+    await writeFile(
+      policyPath,
+      JSON.stringify({
+        version: 1,
+        id: "integration-rubric",
+        question: "task_class",
+        type: "choice",
+        instructions: "Classify the request under the integration rubric.",
+        criteria: {
+          quick: "Quick.",
+          standard: "Standard.",
+          deep: "Deep.",
+          uncertain: "Uncertain.",
+        },
+      }),
+    );
+
+    const f = await fixture(t, false, true, policyPath);
+    const before = f.records().length;
+    await f.session.prompt("Classify with the external rubric.");
+
+    const appended = f.records().slice(before);
+
+    const decisions = appended.filter((entry) => entry.customType === "typesafe-router-decision");
+
+    const recordData = JSON.stringify(decisions.map((entry) => entry.data));
+
+    assert.equal(decisions.length, 1);
+    assert.ok(recordData.includes("integration-rubric"), "provenance names the applied policy");
+    assert.ok(
+      !recordData.includes("jev-task-class-v1"),
+      "the bundled rubric must not appear once policyPath is configured",
+    );
     assert.deepEqual(f.errors, []);
   });
 
